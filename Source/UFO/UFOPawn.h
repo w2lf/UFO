@@ -17,46 +17,56 @@ class UInputAction;
 struct FMinimalViewInfo;
 
 /**
- * UFO Pawn with trackball-based camera and rotation controls
- * Left trackball: camera rotation
- * Right trackball: UFO rotation
- * Uses quaternions to avoid gimbal lock
+ * AUFOPawn
+ *
+ * The player-controlled UFO saucer.
+ * - Left trackball  : rotates the camera around the ship
+ * - Right trackball : rotates the ship itself
+ * All rotations use quaternions to avoid gimbal lock.
  */
 UCLASS()
 class UFO_API AUFOPawn : public APawn
 {
 	GENERATED_BODY()
 
+	// -----------------------------------------------------------------------
+	// Lifecycle
+	// -----------------------------------------------------------------------
 public:
 	AUFOPawn();
-
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaTime) override;
 	virtual void CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult) override;
 	virtual void SetupPlayerInputComponent(class UInputComponent* PlayerInputComponent) override;
 
+	// -----------------------------------------------------------------------
+	// Components
+	// -----------------------------------------------------------------------
 protected:
-	// UFO mesh
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "UFO")
+	/** Flat saucer body (cylinder mesh) */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "UFO|Mesh")
 	UStaticMeshComponent* UFOMesh;
 
-	// Upper dome mesh to make silhouette look like a classic UFO.
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "UFO")
+	/** Glass dome on top of the saucer */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "UFO|Mesh")
 	UStaticMeshComponent* UFODomeMesh;
 
-	// Front arrow marker to indicate ship heading.
-	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "UFO")
+	/** Small cone arrow showing the ship's forward direction */
+	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "UFO|Mesh")
 	UStaticMeshComponent* UFOFrontArrowMesh;
 
-	// Spring arm for camera
+	/** Spring arm that positions the camera behind/above the ship */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Camera")
 	USpringArmComponent* CameraBoom;
 
-	// Camera
+	/** Main game camera */
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Camera")
 	UCameraComponent* Camera;
 
-	// Enhanced Input System
+	// -----------------------------------------------------------------------
+	// Input assets (assign in Blueprint)
+	// -----------------------------------------------------------------------
+protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
 	class UInputMappingContext* DefaultMappingContext;
 
@@ -66,14 +76,19 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadOnly, Category = "Input")
 	UInputAction* RightTrackballAction;
 
-	// Trackball sensitivity
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input")
+	// -----------------------------------------------------------------------
+	// Tuning
+	// -----------------------------------------------------------------------
+protected:
+	/** Scales how fast touch drags rotate the camera */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|Sensitivity")
 	float CameraTrackballSensitivity;
 
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input")
+	/** Scales how fast touch drags rotate the ship */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|Sensitivity")
 	float ShipTrackballSensitivity;
 
-	// Edge behavior: blend from rotate to tilt as thumb approaches trackball ring.
+	/** Normalised radius at which edge-roll effect begins (0–1) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|Trackball")
 	float TrackballEdgeTiltStart;
 
@@ -83,63 +98,101 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Input|Trackball")
 	float TrackballEdgeRollStrength;
 
-	// Movement settings
+	/** Top speed when throttle is at 1.0 */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement")
 	float MaxForwardSpeed;
 
-	UPROPERTY(BlueprintReadOnly, Category = "Movement")
-	float ThrottleNormalized;
-
-	UPROPERTY(BlueprintReadOnly, Category = "Movement")
-	float TargetThrottleNormalized;
-
+	/** Rate at which throttle ramps up (units/sec) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement")
 	float ThrottleAccelerationRate;
 
+	/** Rate at which throttle ramps down (units/sec) */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Movement")
 	float ThrottleDecelerationRate;
 
-	// Current quaternion rotations
+	// -----------------------------------------------------------------------
+	// Runtime state
+	// -----------------------------------------------------------------------
+protected:
+	/** Current smoothed throttle (0–1) */
+	UPROPERTY(BlueprintReadOnly, Category = "Movement")
+	float ThrottleNormalized;
+
+	/** Desired throttle set by UI (0–1) */
+	UPROPERTY(BlueprintReadOnly, Category = "Movement")
+	float TargetThrottleNormalized;
+
+	/** Current camera orientation as a quaternion */
 	UPROPERTY(BlueprintReadOnly, Category = "Rotation")
 	FQuat CameraRotation;
 
+	/** Current ship orientation as a quaternion */
 	UPROPERTY(BlueprintReadOnly, Category = "Rotation")
 	FQuat ShipRotation;
 
-	// Accumulated tilt/roll from circular edge gestures.
+	/** Accumulated roll from circular edge gestures */
 	float CameraRollAngle;
 	float ShipRollAngle;
 
-	// Trackball positions
+	/** Screen-space trackball anchor and thumb positions */
 	FVector2D LeftTrackballCenter;
 	FVector2D RightTrackballCenter;
 	FVector2D LeftTrackballPosition;
 	FVector2D RightTrackballPosition;
+
+	/** Radius of the virtual trackball sphere in pixels */
 	float TrackballRadius;
 
-	// Input callbacks
+	// -----------------------------------------------------------------------
+	// Private helpers
+	// -----------------------------------------------------------------------
+private:
+	/** Shared trackball drag logic used by both left and right trackballs */
+	void ApplyTrackballDrag(
+		const FVector2D& PreviousPos,
+		const FVector2D& CurrentPos,
+		const FVector2D& Center,
+		float Sensitivity,
+		FQuat& InOutRotation,
+		float& InOutRollAngle) const;
+
+	/** Sets up UFO mesh, dome and heading arrow in the constructor */
+	void SetupUFOMeshComponents();
+
+	/** Sets up spring arm and camera in the constructor */
+	void SetupCameraComponents();
+
+	/** Input callbacks bound via Enhanced Input */
 	void OnLeftTrackball(const FInputActionValue& Value);
 	void OnRightTrackball(const FInputActionValue& Value);
-	
-	// Trackball helper functions
+
+	/** Projects a 2-D trackball position onto the virtual sphere surface */
 	FVector GetTrackballVector(FVector2D TrackballPos, FVector2D TrackballCenter) const;
+
+	/** Computes the rotation quaternion between two trackball positions */
 	FQuat GetTrackballRotation(FVector2D OldPos, FVector2D NewPos, FVector2D Center, float Sensitivity) const;
 
+	// -----------------------------------------------------------------------
+	// Public API
+	// -----------------------------------------------------------------------
 public:
-	// UI drag callbacks (screen-space)
+	/** Called by TrackballUI when the left thumb drags across the screen */
 	void ApplyLeftTrackballDrag(const FVector2D& PreviousPos, const FVector2D& CurrentPos);
+
+	/** Called by TrackballUI when the right thumb drags across the screen */
 	void ApplyRightTrackballDrag(const FVector2D& PreviousPos, const FVector2D& CurrentPos);
 
-	// Getters
 	UFUNCTION(BlueprintCallable, Category = "UFO")
 	FQuat GetCameraRotation() const { return CameraRotation; }
 
 	UFUNCTION(BlueprintCallable, Category = "UFO")
 	FQuat GetShipRotation() const { return ShipRotation; }
 
+	/** Returns the world-space forward vector of the ship (used for projectile launch) */
 	UFUNCTION(BlueprintCallable, Category = "UFO")
 	FVector GetUFOLaunchDirection() const;
 
+	/** Set the desired throttle (0 = stop, 1 = full speed) */
 	UFUNCTION(BlueprintCallable, Category = "Movement")
 	void SetThrottleNormalized(float InThrottle);
 

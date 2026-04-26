@@ -3,7 +3,6 @@
 #include "UFOPawn.h"
 #include "Camera/CameraComponent.h"
 #include "GameFramework/SpringArmComponent.h"
-#include "GameFramework/CharacterMovementComponent.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "InputActionValue.h"
@@ -13,8 +12,36 @@
 #include "Engine/World.h"
 #include "Camera/CameraTypes.h"
 
+// ---------------------------------------------------------------------------
+// Local constants  (avoids magic numbers scattered through the file)
+// ---------------------------------------------------------------------------
+namespace UFOPawnConstants
+{
+	constexpr float CameraBoomLength      = 900.0f;
+	constexpr float CameraBoomHeight      = 70.0f;   // Z offset of the pivot
+	constexpr float ExposureBias          = 14.0f;
+
+	constexpr float SaucerScaleXY        = 2.2f;
+	constexpr float SaucerScaleZ         = 0.22f;
+	constexpr float DomeOffsetZ          = 45.0f;
+	constexpr float DomeScaleZ           = 0.35f;
+	constexpr float ArrowOffsetX         = 220.0f;
+	constexpr float ArrowOffsetZ         = 20.0f;
+	constexpr float ArrowScaleXY         = 0.18f;
+	constexpr float ArrowScaleZ          = 0.35f;
+
+	constexpr float SafeSpawnRadius      = 2000.0f;  // Move ship if closer to origin
+	constexpr float TiltDecayRate        = 2.5f;     // Roll returns to zero at this rate
+	constexpr float TrackballRotScale    = 3.0f;     // Base rotation scale for input callbacks
+	constexpr float TrackballDragScale   = 0.01f;    // Base rotation scale for UI drag callbacks
+}
+
+// ---------------------------------------------------------------------------
+// Local helpers
+// ---------------------------------------------------------------------------
 namespace
 {
+	/** Returns +1 or -1 depending on whether the camera/ship is "right-side up" */
 	float GetDragSignFromUpVector(const FVector& UpVector)
 	{
 		const float UpDot = FVector::DotProduct(UpVector, FVector::UpVector);
@@ -22,204 +49,180 @@ namespace
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Constructor
+// ---------------------------------------------------------------------------
 AUFOPawn::AUFOPawn()
 {
 	PrimaryActorTick.bCanEverTick = true;
 	PrimaryActorTick.TickInterval = 0.0f;
 
-	// Don't rotate character with camera
 	bUseControllerRotationPitch = false;
-	bUseControllerRotationYaw = false;
-	bUseControllerRotationRoll = false;
+	bUseControllerRotationYaw   = false;
+	bUseControllerRotationRoll  = false;
 
-	// Create UFO mesh
-	UFOMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("UFOMesh"));
-	UFODomeMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("UFODomeMesh"));
+	SetupUFOMeshComponents();
+	SetupCameraComponents();
+
+	// Initial orientations
+	CameraRotation = FRotator(-25.0f, 0.0f, 0.0f).Quaternion();
+	ShipRotation   = FQuat::Identity;
+	CameraRollAngle = 0.0f;
+	ShipRollAngle   = 0.0f;
+
+	// Sensitivities
+	CameraTrackballSensitivity = 1.0f;
+	ShipTrackballSensitivity   = 1.0f;
+	TrackballEdgeTiltStart     = 0.72f;
+	TrackballEdgeTiltStrength  = 1.0f;
+	TrackballEdgeRollStrength  = 1.0f;
+
+	// Movement
+	MaxForwardSpeed          = 3000.0f;
+	ThrottleNormalized       = 0.0f;
+	TargetThrottleNormalized = 0.0f;
+	ThrottleAccelerationRate = 1.2f;
+	ThrottleDecelerationRate = 2.0f;
+
+	TrackballRadius = 100.0f;
+}
+
+// ---------------------------------------------------------------------------
+// Constructor helpers
+// ---------------------------------------------------------------------------
+
+void AUFOPawn::SetupUFOMeshComponents()
+{
+	UFOMesh           = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("UFOMesh"));
+	UFODomeMesh       = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("UFODomeMesh"));
 	UFOFrontArrowMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("UFOFrontArrowMesh"));
-	if (UFOMesh)
-	{
-		UFOMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-		UFOMesh->SetCollisionObjectType(ECC_WorldDynamic);
-		UFOMesh->SetMobility(EComponentMobility::Movable);
-		RootComponent = UFOMesh;
 
-		// Build a simple UFO silhouette using engine primitives (saucer + dome + heading arrow).
-		static ConstructorHelpers::FObjectFinder<UStaticMesh> CylinderMesh(TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
-		static ConstructorHelpers::FObjectFinder<UStaticMesh> SphereMesh(TEXT("/Engine/BasicShapes/Sphere.Sphere"));
-		static ConstructorHelpers::FObjectFinder<UStaticMesh> ConeMesh(TEXT("/Engine/BasicShapes/Cone.Cone"));
-
-		if (CylinderMesh.Succeeded())
-		{
-			UFOMesh->SetStaticMesh(CylinderMesh.Object);
-			UFOMesh->SetRelativeScale3D(FVector(2.2f, 2.2f, 0.22f));
-			UE_LOG(LogTemp, Warning, TEXT("UFOPawn: UFO saucer body mesh loaded"));
-		}
-		else
-		{
-			UE_LOG(LogTemp, Warning, TEXT("UFOPawn: Failed to load cylinder mesh, using wireframe fallback"));
-		}
-
-		if (UFODomeMesh)
-		{
-			UFODomeMesh->SetupAttachment(UFOMesh);
-			UFODomeMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-			UFODomeMesh->SetMobility(EComponentMobility::Movable);
-			UFODomeMesh->SetVisibility(true);
-			if (SphereMesh.Succeeded())
-			{
-				UFODomeMesh->SetStaticMesh(SphereMesh.Object);
-				UFODomeMesh->SetRelativeLocation(FVector(0.0f, 0.0f, 45.0f));
-				UFODomeMesh->SetRelativeScale3D(FVector(1.0f, 1.0f, 0.35f));
-			}
-		}
-
-		if (UFOFrontArrowMesh)
-		{
-			UFOFrontArrowMesh->SetupAttachment(UFOMesh);
-			UFOFrontArrowMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-			UFOFrontArrowMesh->SetMobility(EComponentMobility::Movable);
-			UFOFrontArrowMesh->SetVisibility(true);
-			if (ConeMesh.Succeeded())
-			{
-				UFOFrontArrowMesh->SetStaticMesh(ConeMesh.Object);
-				UFOFrontArrowMesh->SetRelativeLocation(FVector(220.0f, 0.0f, 20.0f));
-				UFOFrontArrowMesh->SetRelativeRotation(FRotator(-90.0f, 0.0f, 0.0f));
-				UFOFrontArrowMesh->SetRelativeScale3D(FVector(0.18f, 0.18f, 0.35f));
-			}
-		}
-		
-		// Make sure the mesh is visible even if empty
-		UFOMesh->SetVisibility(true);
-		#if WITH_EDITORONLY_DATA
-		UFOMesh->bVisualizeComponent = true;
-		if (UFODomeMesh)
-		{
-			UFODomeMesh->bVisualizeComponent = true;
-		}
-		if (UFOFrontArrowMesh)
-		{
-			UFOFrontArrowMesh->bVisualizeComponent = true;
-		}
-		#endif
-	}
-	else
+	if (!UFOMesh)
 	{
 		UE_LOG(LogTemp, Error, TEXT("UFOPawn: Failed to create UFO mesh component!"));
-		// Create a dummy root component to prevent crashes
-		USceneComponent* DummyRoot = CreateDefaultSubobject<USceneComponent>(TEXT("DummyRoot"));
-		if (DummyRoot)
-		{
-			RootComponent = DummyRoot;
-			UE_LOG(LogTemp, Warning, TEXT("UFOPawn: Created dummy scene component as fallback root"));
-		}
+		RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("DummyRoot"));
+		return;
 	}
 
-	// Create camera boom (RootComponent is guaranteed to exist at this point)
+	// Saucer body
+	UFOMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	UFOMesh->SetCollisionObjectType(ECC_WorldDynamic);
+	UFOMesh->SetMobility(EComponentMobility::Movable);
+	UFOMesh->SetVisibility(true);
+	RootComponent = UFOMesh;
+
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> CylinderMesh(TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> SphereMesh(TEXT("/Engine/BasicShapes/Sphere.Sphere"));
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> ConeMesh(TEXT("/Engine/BasicShapes/Cone.Cone"));
+
+	if (CylinderMesh.Succeeded())
+	{
+		UFOMesh->SetStaticMesh(CylinderMesh.Object);
+		UFOMesh->SetRelativeScale3D(FVector(
+			UFOPawnConstants::SaucerScaleXY,
+			UFOPawnConstants::SaucerScaleXY,
+			UFOPawnConstants::SaucerScaleZ));
+	}
+
+	// Glass dome
+	if (UFODomeMesh && SphereMesh.Succeeded())
+	{
+		UFODomeMesh->SetupAttachment(UFOMesh);
+		UFODomeMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		UFODomeMesh->SetMobility(EComponentMobility::Movable);
+		UFODomeMesh->SetStaticMesh(SphereMesh.Object);
+		UFODomeMesh->SetRelativeLocation(FVector(0.0f, 0.0f, UFOPawnConstants::DomeOffsetZ));
+		UFODomeMesh->SetRelativeScale3D(FVector(1.0f, 1.0f, UFOPawnConstants::DomeScaleZ));
+	}
+
+	// Heading arrow
+	if (UFOFrontArrowMesh && ConeMesh.Succeeded())
+	{
+		UFOFrontArrowMesh->SetupAttachment(UFOMesh);
+		UFOFrontArrowMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		UFOFrontArrowMesh->SetMobility(EComponentMobility::Movable);
+		UFOFrontArrowMesh->SetStaticMesh(ConeMesh.Object);
+		UFOFrontArrowMesh->SetRelativeLocation(FVector(
+			UFOPawnConstants::ArrowOffsetX, 0.0f, UFOPawnConstants::ArrowOffsetZ));
+		UFOFrontArrowMesh->SetRelativeRotation(FRotator(-90.0f, 0.0f, 0.0f));
+		UFOFrontArrowMesh->SetRelativeScale3D(FVector(
+			UFOPawnConstants::ArrowScaleXY,
+			UFOPawnConstants::ArrowScaleXY,
+			UFOPawnConstants::ArrowScaleZ));
+	}
+}
+
+void AUFOPawn::SetupCameraComponents()
+{
+	if (!RootComponent) return;
+
+	// Spring arm — keeps camera at a fixed offset and never inherits ship roll
 	CameraBoom = CreateDefaultSubobject<USpringArmComponent>(TEXT("CameraBoom"));
-	if (CameraBoom && RootComponent)
+	if (CameraBoom)
 	{
 		CameraBoom->SetupAttachment(RootComponent);
-		CameraBoom->TargetArmLength = 900.0f;
+		CameraBoom->TargetArmLength = UFOPawnConstants::CameraBoomLength;
 		CameraBoom->bUsePawnControlRotation = false;
-		CameraBoom->SetRelativeLocation(FVector(0.0f, 0.0f, 70.0f));
-		// Keep spring-arm orientation fully independent of parent ship rotation.
+		CameraBoom->SetRelativeLocation(FVector(0.0f, 0.0f, UFOPawnConstants::CameraBoomHeight));
 		CameraBoom->SetUsingAbsoluteRotation(true);
 		CameraBoom->bInheritPitch = false;
-		CameraBoom->bInheritYaw = false;
-		CameraBoom->bInheritRoll = false;
-		CameraBoom->bEnableCameraLag = false;
+		CameraBoom->bInheritYaw   = false;
+		CameraBoom->bInheritRoll  = false;
+		CameraBoom->bEnableCameraLag         = false;
 		CameraBoom->bEnableCameraRotationLag = false;
-		CameraBoom->bDoCollisionTest = false;
+		CameraBoom->bDoCollisionTest         = false;
 	}
 
-	// Create camera
+	// Camera — manual exposure so space looks good
 	Camera = CreateDefaultSubobject<UCameraComponent>(TEXT("Camera"));
 	if (Camera && CameraBoom)
 	{
 		Camera->SetupAttachment(CameraBoom, USpringArmComponent::SocketName);
 		Camera->bUsePawnControlRotation = false;
-		Camera->PostProcessBlendWeight = 1.0f;
+		Camera->PostProcessBlendWeight  = 1.0f;
 		Camera->PostProcessSettings.bOverride_AutoExposureMethod = true;
-		Camera->PostProcessSettings.AutoExposureMethod = EAutoExposureMethod::AEM_Manual;
-		Camera->PostProcessSettings.bOverride_AutoExposureBias = true;
-		Camera->PostProcessSettings.AutoExposureBias = 14.0f;
+		Camera->PostProcessSettings.AutoExposureMethod           = EAutoExposureMethod::AEM_Manual;
+		Camera->PostProcessSettings.bOverride_AutoExposureBias   = true;
+		Camera->PostProcessSettings.AutoExposureBias             = UFOPawnConstants::ExposureBias;
 	}
-
-	// Start camera with a slight top-down tilt so the ship sits ahead in frame.
-	CameraRotation = FRotator(-25.0f, 0.0f, 0.0f).Quaternion();
-	ShipRotation = FQuat::Identity;
-	CameraRollAngle = 0.0f;
-	ShipRollAngle = 0.0f;
-
-	// Input sensitivities
-	CameraTrackballSensitivity = 1.0f;
-	ShipTrackballSensitivity = 1.0f;
-	TrackballEdgeTiltStart = 0.72f;
-	TrackballEdgeTiltStrength = 1.0f;
-	TrackballEdgeRollStrength = 1.0f;
-	MaxForwardSpeed = 3000.0f;
-	ThrottleNormalized = 0.0f;
-	TargetThrottleNormalized = 0.0f;
-	ThrottleAccelerationRate = 1.2f;
-	ThrottleDecelerationRate = 2.0f;
-
-	// Trackball setup
-	TrackballRadius = 100.0f; // Virtual trackball radius
 }
+
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
 
 void AUFOPawn::BeginPlay()
 {
 	Super::BeginPlay();
 
-	UE_LOG(LogTemp, Warning, TEXT("UFOPawn::BeginPlay called"));
-
-	// If spawned too close to origin (where sun is), move away
-	FVector CurrentLocation = GetActorLocation();
-	float DistanceFromOrigin = CurrentLocation.Length();
-	
-	UE_LOG(LogTemp, Warning, TEXT("UFOPawn spawn distance from origin: %.2f"), DistanceFromOrigin);
-	
-	if (DistanceFromOrigin < 2000.0f)  // If within 2000 units of origin
+	// Prevent the ship from spawning inside the sun (at origin)
+	if (GetActorLocation().Length() < UFOPawnConstants::SafeSpawnRadius)
 	{
-		// Move ship 2000 units forward and 500 units up from origin
-		FVector SafeLocation = FVector(2000.0f, 0.0f, 500.0f);
+		const FVector SafeLocation(UFOPawnConstants::SafeSpawnRadius, 0.0f, 500.0f);
 		SetActorLocation(SafeLocation);
-		UE_LOG(LogTemp, Warning, TEXT("UFOPawn moved to safe location: %.2f, %.2f, %.2f"), SafeLocation.X, SafeLocation.Y, SafeLocation.Z);
+		UE_LOG(LogTemp, Warning, TEXT("UFOPawn: Moved to safe spawn location %s"), *SafeLocation.ToString());
 	}
 
-	// Add Input Mapping Context
-	if (APlayerController* PlayerController = Cast<APlayerController>(Controller))
+	// Register enhanced input mapping context
+	if (APlayerController* PC = Cast<APlayerController>(Controller))
 	{
 		if (UEnhancedInputLocalPlayerSubsystem* Subsystem =
-			PlayerController->GetLocalPlayer()->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>())
+			PC->GetLocalPlayer()->GetSubsystem<UEnhancedInputLocalPlayerSubsystem>())
 		{
 			Subsystem->AddMappingContext(DefaultMappingContext, 0);
-			UE_LOG(LogTemp, Warning, TEXT("UFOPawn: Input mapping context added"));
 		}
-		else
-		{
-			UE_LOG(LogTemp, Warning, TEXT("UFOPawn: No input subsystem available yet"));
-		}
-	}
-	else
-	{
-		UE_LOG(LogTemp, Warning, TEXT("UFOPawn: Not yet possessed by controller"));
 	}
 
-	// Get viewport size for trackball positioning
+	// Position the two virtual trackball anchors in the lower corners of the screen
 	if (GEngine && GEngine->GameViewport)
 	{
 		FVector2D ViewportSize;
 		GEngine->GameViewport->GetViewportSize(ViewportSize);
-
-		// Left trackball at bottom-left (30% from left, 70% from top on viewport)
-		LeftTrackballCenter = FVector2D(ViewportSize.X * 0.2f, ViewportSize.Y * 0.8f);
-
-		// Right trackball at bottom-right
+		LeftTrackballCenter  = FVector2D(ViewportSize.X * 0.2f, ViewportSize.Y * 0.8f);
 		RightTrackballCenter = FVector2D(ViewportSize.X * 0.8f, ViewportSize.Y * 0.8f);
 	}
 
-	LeftTrackballPosition = LeftTrackballCenter;
+	LeftTrackballPosition  = LeftTrackballCenter;
 	RightTrackballPosition = RightTrackballCenter;
 }
 
@@ -227,44 +230,42 @@ void AUFOPawn::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
-	const float TiltDecayRate = 2.5f;
-	CameraRollAngle = FMath::FInterpConstantTo(CameraRollAngle, 0.0f, DeltaTime, TiltDecayRate);
-	ShipRollAngle = FMath::FInterpConstantTo(ShipRollAngle, 0.0f, DeltaTime, TiltDecayRate);
+	// Decay any accumulated roll back to zero
+	CameraRollAngle = FMath::FInterpConstantTo(CameraRollAngle, 0.0f, DeltaTime, UFOPawnConstants::TiltDecayRate);
+	ShipRollAngle   = FMath::FInterpConstantTo(ShipRollAngle,   0.0f, DeltaTime, UFOPawnConstants::TiltDecayRate);
 
+	// Apply ship roll on top of its base rotation
 	const FQuat ShipRollQuat(ShipRotation.GetForwardVector(), ShipRollAngle);
 	SetActorRotation(ShipRollQuat * ShipRotation, ETeleportType::None);
 
-	// Smooth throttle changes so acceleration/deceleration is not instant.
+	// Smooth throttle towards the target value
 	if (!FMath::IsNearlyEqual(ThrottleNormalized, TargetThrottleNormalized, KINDA_SMALL_NUMBER))
 	{
-		const bool bAccelerating = TargetThrottleNormalized > ThrottleNormalized;
-		const float InterpRate = bAccelerating ? ThrottleAccelerationRate : ThrottleDecelerationRate;
+		const bool  bAccelerating = TargetThrottleNormalized > ThrottleNormalized;
+		const float InterpRate    = bAccelerating ? ThrottleAccelerationRate : ThrottleDecelerationRate;
 		ThrottleNormalized = FMath::FInterpConstantTo(ThrottleNormalized, TargetThrottleNormalized, DeltaTime, InterpRate);
 	}
 
-	// Move ship forward using frame-rate-independent movement.
+	// Move the ship forward
 	if (ThrottleNormalized > KINDA_SMALL_NUMBER)
 	{
-		const FVector ForwardDirection = ShipRotation.GetForwardVector();
-		const FVector DeltaMove = ForwardDirection * (MaxForwardSpeed * ThrottleNormalized * DeltaTime);
+		const FVector DeltaMove = ShipRotation.GetForwardVector() * (MaxForwardSpeed * ThrottleNormalized * DeltaTime);
 		AddActorWorldOffset(DeltaMove, true);
 	}
-
 }
 
 void AUFOPawn::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 {
 	Super::CalcCamera(DeltaTime, OutResult);
 
-	const float ArmLength = CameraBoom ? CameraBoom->TargetArmLength : 900.0f;
-	const float PivotHeight = CameraBoom ? CameraBoom->GetRelativeLocation().Z : 70.0f;
+	const float ArmLength   = CameraBoom ? CameraBoom->TargetArmLength            : UFOPawnConstants::CameraBoomLength;
+	const float PivotHeight = CameraBoom ? CameraBoom->GetRelativeLocation().Z     : UFOPawnConstants::CameraBoomHeight;
 
-	const FVector PivotLocation = GetActorLocation() + FVector(0.0f, 0.0f, PivotHeight);
-	const FQuat CameraRollQuat(CameraRotation.GetForwardVector(), CameraRollAngle);
-	const FQuat FinalCameraRot = CameraRollQuat * CameraRotation;
-	const FVector CameraForward = FinalCameraRot.GetForwardVector();
+	const FVector PivotLocation  = GetActorLocation() + FVector(0.0f, 0.0f, PivotHeight);
+	const FQuat   CameraRollQuat = FQuat(CameraRotation.GetForwardVector(), CameraRollAngle);
+	const FQuat   FinalCameraRot = CameraRollQuat * CameraRotation;
 
-	OutResult.Location = PivotLocation - (CameraForward * ArmLength);
+	OutResult.Location = PivotLocation - (FinalCameraRot.GetForwardVector() * ArmLength);
 	OutResult.Rotation = FinalCameraRot.Rotator();
 
 	if (Camera)
@@ -273,234 +274,159 @@ void AUFOPawn::CalcCamera(float DeltaTime, FMinimalViewInfo& OutResult)
 	}
 }
 
+// ---------------------------------------------------------------------------
+// Input
+// ---------------------------------------------------------------------------
+
 void AUFOPawn::SetupPlayerInputComponent(UInputComponent* PlayerInputComponent)
 {
 	Super::SetupPlayerInputComponent(PlayerInputComponent);
 
-	if (UEnhancedInputComponent* EnhancedInputComponent = 
-		Cast<UEnhancedInputComponent>(PlayerInputComponent))
+	if (UEnhancedInputComponent* EIC = Cast<UEnhancedInputComponent>(PlayerInputComponent))
 	{
-		// Left trackball - camera control
 		if (LeftTrackballAction)
 		{
-			EnhancedInputComponent->BindAction(LeftTrackballAction, ETriggerEvent::Triggered,
-				this, &AUFOPawn::OnLeftTrackball);
+			EIC->BindAction(LeftTrackballAction,  ETriggerEvent::Triggered, this, &AUFOPawn::OnLeftTrackball);
 		}
-
-		// Right trackball - ship rotation
 		if (RightTrackballAction)
 		{
-			EnhancedInputComponent->BindAction(RightTrackballAction, ETriggerEvent::Triggered,
-				this, &AUFOPawn::OnRightTrackball);
+			EIC->BindAction(RightTrackballAction, ETriggerEvent::Triggered, this, &AUFOPawn::OnRightTrackball);
 		}
 	}
 }
 
 void AUFOPawn::OnLeftTrackball(const FInputActionValue& Value)
 {
-	const FVector2D TrackballInput = Value.Get<FVector2D>();
-	if (TrackballInput.IsNearlyZero())
-	{
-		return;
-	}
+	const FVector2D Input = Value.Get<FVector2D>();
+	if (Input.IsNearlyZero()) return;
 
-	const float DeltaSeconds = GetWorld() ? GetWorld()->GetDeltaSeconds() : (1.0f / 60.0f);
-	const float RotationScale = 3.0f * CameraTrackballSensitivity * DeltaSeconds;
-	const FQuat CameraRollQuat(CameraRotation.GetForwardVector(), CameraRollAngle);
-	const FQuat EffectiveCameraRot = CameraRollQuat * CameraRotation;
-	const float DragSign = GetDragSignFromUpVector(EffectiveCameraRot.GetUpVector());
-	const float RadialNorm = FMath::Clamp(TrackballInput.Size(), 0.0f, 1.0f);
-	const float EdgeAlpha = FMath::GetMappedRangeValueClamped(
-		FVector2D(TrackballEdgeTiltStart, 1.0f),
-		FVector2D(0.0f, 1.0f),
-		RadialNorm
-	);
+	const float DeltaSeconds  = GetWorld() ? GetWorld()->GetDeltaSeconds() : (1.0f / 60.0f);
+	const float Sensitivity   = UFOPawnConstants::TrackballRotScale * CameraTrackballSensitivity * DeltaSeconds;
 
-	const FVector2D PrevNormPosL = (LeftTrackballPosition - LeftTrackballCenter) / FMath::Max(1.0f, TrackballRadius);
-	const FVector2D PositionDeltaL = TrackballInput - PrevNormPosL;
-	float TangentialAmount = 0.0f;
-	if (TrackballInput.Size() > SMALL_NUMBER)
-	{
-		const FVector2D RadialDir = TrackballInput.GetSafeNormal();
-		const FVector2D TangentDir(-RadialDir.Y, RadialDir.X);
-		TangentialAmount = FVector2D::DotProduct(PositionDeltaL, TangentDir);
-	}
+	ApplyTrackballDrag(LeftTrackballPosition, LeftTrackballCenter + Input * TrackballRadius,
+		LeftTrackballCenter, Sensitivity, CameraRotation, CameraRollAngle);
 
-	const FQuat YawDelta(FVector::UpVector, -(TrackballInput.X * DragSign) * RotationScale);
-	const FVector CameraRightAxis = CameraRotation.GetRightVector();
-	const FQuat PitchDelta(CameraRightAxis, -TrackballInput.Y * RotationScale);
-
-	CameraRollAngle += TangentialAmount * RotationScale * EdgeAlpha * TrackballEdgeRollStrength;
-
-	CameraRotation = PitchDelta * YawDelta * CameraRotation;
-	CameraRotation.Normalize();
-
-	LeftTrackballPosition = LeftTrackballCenter + TrackballInput * TrackballRadius;
+	LeftTrackballPosition = LeftTrackballCenter + Input * TrackballRadius;
 }
 
 void AUFOPawn::OnRightTrackball(const FInputActionValue& Value)
 {
-	const FVector2D TrackballInput = Value.Get<FVector2D>();
-	if (TrackballInput.IsNearlyZero())
-	{
-		return;
-	}
+	const FVector2D Input = Value.Get<FVector2D>();
+	if (Input.IsNearlyZero()) return;
 
 	const float DeltaSeconds = GetWorld() ? GetWorld()->GetDeltaSeconds() : (1.0f / 60.0f);
-	const float RotationScale = 3.0f * ShipTrackballSensitivity * DeltaSeconds;
-	const FQuat ShipRollQuat(ShipRotation.GetForwardVector(), ShipRollAngle);
-	const FQuat EffectiveShipRot = ShipRollQuat * ShipRotation;
-	const float DragSign = GetDragSignFromUpVector(EffectiveShipRot.GetUpVector());
-	const float RadialNorm = FMath::Clamp(TrackballInput.Size(), 0.0f, 1.0f);
-	const float EdgeAlpha = FMath::GetMappedRangeValueClamped(
-		FVector2D(TrackballEdgeTiltStart, 1.0f),
-		FVector2D(0.0f, 1.0f),
-		RadialNorm
-	);
+	const float Sensitivity  = UFOPawnConstants::TrackballRotScale * ShipTrackballSensitivity * DeltaSeconds;
 
-	const FVector2D PrevNormPosR = (RightTrackballPosition - RightTrackballCenter) / FMath::Max(1.0f, TrackballRadius);
-	const FVector2D PositionDeltaR = TrackballInput - PrevNormPosR;
-	float TangentialAmount = 0.0f;
-	if (TrackballInput.Size() > SMALL_NUMBER)
-	{
-		const FVector2D RadialDir = TrackballInput.GetSafeNormal();
-		const FVector2D TangentDir(-RadialDir.Y, RadialDir.X);
-		TangentialAmount = FVector2D::DotProduct(PositionDeltaR, TangentDir);
-	}
+	ApplyTrackballDrag(RightTrackballPosition, RightTrackballCenter + Input * TrackballRadius,
+		RightTrackballCenter, Sensitivity, ShipRotation, ShipRollAngle);
 
-	const FQuat YawDelta(FVector::UpVector, -(TrackballInput.X * DragSign) * RotationScale);
-	const FVector ShipRightAxis = ShipRotation.GetRightVector();
-	const FQuat PitchDelta(ShipRightAxis, -TrackballInput.Y * RotationScale);
-
-	ShipRollAngle += TangentialAmount * RotationScale * EdgeAlpha * TrackballEdgeRollStrength;
-
-	ShipRotation = PitchDelta * YawDelta * ShipRotation;
-	ShipRotation.Normalize();
-
-	RightTrackballPosition = RightTrackballCenter + TrackballInput * TrackballRadius;
+	RightTrackballPosition = RightTrackballCenter + Input * TrackballRadius;
 }
 
 void AUFOPawn::ApplyLeftTrackballDrag(const FVector2D& PreviousPos, const FVector2D& CurrentPos)
 {
-	const FVector2D Delta = CurrentPos - PreviousPos;
-	const float RotationScale = 0.01f * CameraTrackballSensitivity;
-	const FQuat CameraRollQuat(CameraRotation.GetForwardVector(), CameraRollAngle);
-	const FQuat EffectiveCameraRot = CameraRollQuat * CameraRotation;
-	const float DragSign = GetDragSignFromUpVector(EffectiveCameraRot.GetUpVector());
-	const FVector2D OffsetFromCenter = CurrentPos - LeftTrackballCenter;
-	const float RadialNorm = FMath::Clamp(OffsetFromCenter.Size() / FMath::Max(1.0f, TrackballRadius), 0.0f, 1.0f);
-	const float EdgeAlpha = FMath::GetMappedRangeValueClamped(
-		FVector2D(TrackballEdgeTiltStart, 1.0f),
-		FVector2D(0.0f, 1.0f),
-		RadialNorm
-	);
-
-	float TangentialAmount = 0.0f;
-	if (OffsetFromCenter.Size() > SMALL_NUMBER)
-	{
-		const FVector2D RadialDir = OffsetFromCenter.GetSafeNormal();
-		const FVector2D TangentDir(-RadialDir.Y, RadialDir.X);
-		TangentialAmount = FVector2D::DotProduct(Delta, TangentDir);
-	}
-
-	const FQuat YawDelta(FVector::UpVector, -(Delta.X * DragSign) * RotationScale);
-	const FVector CameraRightAxis = CameraRotation.GetRightVector();
-	const FQuat PitchDelta(CameraRightAxis, -Delta.Y * RotationScale);
-
-	CameraRollAngle += TangentialAmount * RotationScale * EdgeAlpha * TrackballEdgeRollStrength;
-
-	CameraRotation = PitchDelta * YawDelta * CameraRotation;
-	CameraRotation.Normalize();
+	const float Sensitivity = UFOPawnConstants::TrackballDragScale * CameraTrackballSensitivity;
+	ApplyTrackballDrag(PreviousPos, CurrentPos, LeftTrackballCenter, Sensitivity, CameraRotation, CameraRollAngle);
 	LeftTrackballPosition = CurrentPos;
 }
 
 void AUFOPawn::ApplyRightTrackballDrag(const FVector2D& PreviousPos, const FVector2D& CurrentPos)
 {
-	const FVector2D Delta = CurrentPos - PreviousPos;
-	const float RotationScale = 0.01f * ShipTrackballSensitivity;
-	const FQuat ShipRollQuat(ShipRotation.GetForwardVector(), ShipRollAngle);
-	const FQuat EffectiveShipRot = ShipRollQuat * ShipRotation;
-	const float DragSign = GetDragSignFromUpVector(EffectiveShipRot.GetUpVector());
-	const FVector2D OffsetFromCenter = CurrentPos - RightTrackballCenter;
-	const float RadialNorm = FMath::Clamp(OffsetFromCenter.Size() / FMath::Max(1.0f, TrackballRadius), 0.0f, 1.0f);
-	const float EdgeAlpha = FMath::GetMappedRangeValueClamped(
-		FVector2D(TrackballEdgeTiltStart, 1.0f),
-		FVector2D(0.0f, 1.0f),
-		RadialNorm
-	);
-
-	float TangentialAmount = 0.0f;
-	if (OffsetFromCenter.Size() > SMALL_NUMBER)
-	{
-		const FVector2D RadialDir = OffsetFromCenter.GetSafeNormal();
-		const FVector2D TangentDir(-RadialDir.Y, RadialDir.X);
-		TangentialAmount = FVector2D::DotProduct(Delta, TangentDir);
-	}
-
-	const FQuat YawDelta(FVector::UpVector, -(Delta.X * DragSign) * RotationScale);
-	const FVector ShipRightAxis = ShipRotation.GetRightVector();
-	const FQuat PitchDelta(ShipRightAxis, -Delta.Y * RotationScale);
-
-	ShipRollAngle += TangentialAmount * RotationScale * EdgeAlpha * TrackballEdgeRollStrength;
-
-	ShipRotation = PitchDelta * YawDelta * ShipRotation;
-	ShipRotation.Normalize();
+	const float Sensitivity = UFOPawnConstants::TrackballDragScale * ShipTrackballSensitivity;
+	ApplyTrackballDrag(PreviousPos, CurrentPos, RightTrackballCenter, Sensitivity, ShipRotation, ShipRollAngle);
 	RightTrackballPosition = CurrentPos;
 }
 
+// ---------------------------------------------------------------------------
+// Shared trackball math  (replaces the four near-identical blocks above)
+// ---------------------------------------------------------------------------
+
+void AUFOPawn::ApplyTrackballDrag(
+	const FVector2D& PreviousPos,
+	const FVector2D& CurrentPos,
+	const FVector2D& Center,
+	float            Sensitivity,
+	FQuat&           InOutRotation,
+	float&           InOutRollAngle) const
+{
+	const FVector2D Delta          = CurrentPos - PreviousPos;
+	const FVector2D OffsetFromCenter = CurrentPos - Center;
+
+	// How far from center (0=center, 1=edge)
+	const float RadialNorm = FMath::Clamp(
+		OffsetFromCenter.Size() / FMath::Max(1.0f, TrackballRadius), 0.0f, 1.0f);
+
+	// Edge-roll alpha: zero near center, ramps to 1 near the edge
+	const float EdgeAlpha = FMath::GetMappedRangeValueClamped(
+		FVector2D(TrackballEdgeTiltStart, 1.0f),
+		FVector2D(0.0f, 1.0f),
+		RadialNorm);
+
+	// Tangential component of the delta (controls roll)
+	float TangentialAmount = 0.0f;
+	if (OffsetFromCenter.Size() > SMALL_NUMBER)
+	{
+		const FVector2D RadialDir  = OffsetFromCenter.GetSafeNormal();
+		const FVector2D TangentDir = FVector2D(-RadialDir.Y, RadialDir.X);
+		TangentialAmount = FVector2D::DotProduct(Delta, TangentDir);
+	}
+
+	// Flip yaw direction if rotation is upside-down
+	const FQuat   RollQuat   = FQuat(InOutRotation.GetForwardVector(), InOutRollAngle);
+	const FQuat   EffRot     = RollQuat * InOutRotation;
+	const float   DragSign   = GetDragSignFromUpVector(EffRot.GetUpVector());
+
+	const FQuat YawDelta   = FQuat(FVector::UpVector,                -(Delta.X * DragSign) * Sensitivity);
+	const FQuat PitchDelta = FQuat(InOutRotation.GetRightVector(),   -Delta.Y              * Sensitivity);
+
+	InOutRollAngle += TangentialAmount * Sensitivity * EdgeAlpha * TrackballEdgeRollStrength;
+	InOutRotation   = (PitchDelta * YawDelta * InOutRotation).GetNormalized();
+}
+
+// ---------------------------------------------------------------------------
+// Trackball geometry helpers
+// ---------------------------------------------------------------------------
+
 FVector AUFOPawn::GetTrackballVector(FVector2D TrackballPos, FVector2D TrackballCenter) const
 {
-	FVector2D Offset = TrackballPos - TrackballCenter;
-	
-	// Clamp to trackball radius
-	float DistanceSquared = Offset.SizeSquared();
-	float RadiusSquared = TrackballRadius * TrackballRadius;
+	const FVector2D Offset       = TrackballPos - TrackballCenter;
+	const float     RadiusSq     = TrackballRadius * TrackballRadius;
+	const float     DistanceSq   = Offset.SizeSquared();
 
 	FVector Result;
-	if (DistanceSquared <= RadiusSquared)
+	if (DistanceSq <= RadiusSq)
 	{
-		// Inside sphere
-		Result = FVector(Offset.X, Offset.Y, FMath::Sqrt(FMath::Max(0.0f, RadiusSquared - DistanceSquared)));
+		// Point is inside the sphere — compute the Z component
+		Result = FVector(Offset.X, Offset.Y, FMath::Sqrt(FMath::Max(0.0f, RadiusSq - DistanceSq)));
 	}
 	else
 	{
-		// On edge of sphere
+		// Point is outside — project onto the equator
 		Result = FVector(Offset.X, Offset.Y, 0.0f);
 	}
 
-	Result.Normalize();
-	return Result;
+	return Result.GetSafeNormal();
 }
 
 FQuat AUFOPawn::GetTrackballRotation(FVector2D OldPos, FVector2D NewPos, FVector2D Center, float Sensitivity) const
 {
-	FVector OldVector = GetTrackballVector(OldPos, Center);
-	FVector NewVector = GetTrackballVector(NewPos, Center);
+	const FVector OldVec = GetTrackballVector(OldPos, Center);
+	const FVector NewVec = GetTrackballVector(NewPos, Center);
 
-	// Calculate axis and angle using cross product
-	FVector Axis = FVector::CrossProduct(OldVector, NewVector);
-	
-	if (Axis.SizeSquared() < 1e-6f)
-	{
-		// No rotation
-		return FQuat::Identity;
-	}
+	FVector Axis = FVector::CrossProduct(OldVec, NewVec);
+	if (Axis.SizeSquared() < 1e-6f) return FQuat::Identity;
 
 	Axis.Normalize();
-
-	// Calculate angle using dot product
-	float Angle = FMath::Acos(FMath::Clamp(FVector::DotProduct(OldVector, NewVector), -1.0f, 1.0f));
-
-	// Create quaternion from axis-angle
-	FQuat ResultQuat = FQuat(Axis, Angle * Sensitivity);
-	ResultQuat.Normalize();
-
-	return ResultQuat;
+	const float Angle = FMath::Acos(FMath::Clamp(FVector::DotProduct(OldVec, NewVec), -1.0f, 1.0f));
+	return FQuat(Axis, Angle * Sensitivity).GetNormalized();
 }
+
+// ---------------------------------------------------------------------------
+// Misc
+// ---------------------------------------------------------------------------
 
 FVector AUFOPawn::GetUFOLaunchDirection() const
 {
-	// Returns the forward direction of the UFO based on its rotation
 	return ShipRotation.GetForwardVector();
 }
 
