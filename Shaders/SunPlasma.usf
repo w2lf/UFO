@@ -1,0 +1,91 @@
+// Sun plasma helper functions for Unreal Material Custom node.
+//
+// HOW TO USE (SM6 / Path Tracing compatible):
+//
+// STEP 1 - In the Custom node's "Include File Paths" array, add:
+//      /Project/SunPlasma.usf
+//
+// STEP 2 - Set the Custom node code body to ONLY this one line:
+//      return SunPlasmaMask(Pos, Time, PlasmaSpeed, Distortion, PulseStrength);
+//
+// STEP 3 - Input pin names (exact, no type annotations):
+//      Pos (float3) -> connect VertexNormalWS node   <-- SEAMLESS, replaces UV
+//      Time (float) -> connect Time node
+//      PlasmaSpeed, Distortion, PulseStrength (float) -> scalar parameters
+//
+// WHY VertexNormalWS instead of UV:
+//   Sphere UVs have a hard seam at the back where U wraps 1->0.
+//   The vertex normal is a continuous float3 direction with no seam anywhere.
+
+// ---- 3D hash & noise (seamless on any sphere) ----
+
+float Hash31(float3 p)
+{
+    p = frac(p * float3(443.897, 441.423, 437.195));
+    p += dot(p, p.yzx + 19.19);
+    return frac((p.x + p.y) * p.z);
+}
+
+float Noise3D(float3 p)
+{
+    float3 i = floor(p);
+    float3 f = frac(p);
+    float3 u = f * f * (3.0 - 2.0 * f);
+
+    float a  = Hash31(i + float3(0,0,0));
+    float b  = Hash31(i + float3(1,0,0));
+    float c  = Hash31(i + float3(0,1,0));
+    float d  = Hash31(i + float3(1,1,0));
+    float e  = Hash31(i + float3(0,0,1));
+    float ff = Hash31(i + float3(1,0,1));
+    float g  = Hash31(i + float3(0,1,1));
+    float h  = Hash31(i + float3(1,1,1));
+
+    return lerp(
+        lerp(lerp(a, b, u.x), lerp(c, d, u.x), u.y),
+        lerp(lerp(e, ff, u.x), lerp(g, h, u.x), u.y),
+        u.z
+    );
+}
+
+float FBM3(float3 p)
+{
+    float v = 0.0;
+    float a = 0.5;
+    float3 q = p;
+    [unroll]
+    for (int i = 0; i < 5; i++)
+    {
+        v += a * Noise3D(q);
+        q = q * 2.03 + float3(17.7, 9.2, 5.31);
+        a *= 0.5;
+    }
+    return v;
+}
+
+// ---- Main plasma function ----
+
+float SunPlasmaMask(float3 Pos, float Time, float PlasmaSpeed, float Distortion, float PulseStrength)
+{
+    float t = Time * max(0.01, PlasmaSpeed);
+
+    // Domain warp: offset Pos by a low-frequency noise vector
+    float3 warp = float3(
+        FBM3(Pos * 1.4 + float3( t * 0.17,  t * 0.11, -t * 0.09)),
+        FBM3(Pos * 1.4 + float3(-t * 0.13,  t * 0.19,  t * 0.07)),
+        FBM3(Pos * 1.4 + float3( t * 0.09, -t * 0.15,  t * 0.21))
+    );
+    float3 warped = Pos + warp * Distortion * 0.4;
+
+    float n1 = FBM3(warped * 1.9 + float3( t * 0.22, -t * 0.17,  t * 0.11));
+    float n2 = FBM3(warped * 3.2 + float3(-t * 0.21,  t * 0.16, -t * 0.13));
+
+    // Animated bands using the 3D radial distance (always 1 on a unit sphere)
+    float bands = sin(dot(Pos, float3(38.0, 34.0, 36.0)) - t * 5.0 + n2 * 6.0) * 0.5 + 0.5;
+
+    float plasma = saturate(n1 * 0.62 + n2 * 0.28 + bands * 0.22);
+    float pulse  = lerp(0.8, 1.3, (sin(t * 2.1) * 0.5 + 0.5) * PulseStrength);
+
+    return saturate(plasma * pulse);
+}
+
