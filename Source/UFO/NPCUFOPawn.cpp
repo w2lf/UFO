@@ -5,37 +5,88 @@
 #include "Components/StaticMeshComponent.h"
 #include "UObject/ConstructorHelpers.h"
 #include "Engine/World.h"
-#include "Math/UnrealMathUtility.h"
 #include "Materials/MaterialInterface.h"
 #include "Materials/MaterialInstanceDynamic.h"
 #include "GameFramework/PlayerController.h"
 #include "Camera/PlayerCameraManager.h"
 #include "Math/RotationMatrix.h"
 
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+namespace NPCUFOPawnConstants
+{
+	constexpr float SaucerScaleXY        = 2.2f;
+	constexpr float SaucerScaleZ         = 0.22f;
+	constexpr float DomeOffsetZ          = 45.0f;
+	constexpr float DomeScaleZ           = 0.35f;
+
+	constexpr int32  RingSegmentCount    = 12;
+	constexpr float  RingRadius          = 260.0f;
+	constexpr float  SegmentScaleXY      = 0.05f;
+	constexpr float  SegmentScaleZ       = 0.28f;
+	constexpr float  MarkerPivotZ        = 170.0f;
+
+	constexpr float  EnemyEmissiveScale  = 2.0f;
+	constexpr float  RingEmissiveScale   = 14.0f;
+
+	const FLinearColor EnemyBodyColor(1.0f, 0.26f, 0.26f, 1.0f);
+	const char* BasicShapeMaterialPath = "/Engine/BasicShapes/BasicShapeMaterial";
+}
+
+// ---------------------------------------------------------------------------
+// Constructor
+// ---------------------------------------------------------------------------
+
 ANPCUFOPawn::ANPCUFOPawn()
 {
 	PrimaryActorTick.bCanEverTick = true;
 
-	MoveSpeed = 600.0f;
-	WanderRadius = 4000.0f;
-	TurnSpeed = 90.0f;
+	// Movement defaults
+	MoveSpeed               = 600.0f;
+	WanderRadius            = 4000.0f;
+	TurnSpeed               = 90.0f;
 	WaypointReachedDistance = 200.0f;
-	SelectionMarkerSpinSpeed = 120.0f;
-	SelectionMarkerMinScale = 0.7f;
-	SelectionMarkerMaxScale = 1.9f;
-	SelectionMarkerDistanceScale = 2200.0f;
-	SelectionMarkerBoundsPadding = 0.5f;
-	ColorTokenIndex = INDEX_NONE;
-	TokenColor = FLinearColor(0.8f, 0.8f, 0.8f, 1.0f);
-	SelectionRingColor = FLinearColor(0.1f, 1.0f, 0.2f, 1.0f);
-	CurrentWaypoint = FVector::ZeroVector;
-	bIsSelected = false;
-	SelectionMarkerAngle = 0.0f;
-	bEnemyHighlighted = false;
-	UFOMeshMID = nullptr;
-	UFODomeMeshMID = nullptr;
 
-	// Saucer body
+	// Selection marker defaults
+	SelectionMarkerSpinSpeed       = 120.0f;
+	SelectionMarkerMinScale        = 0.7f;
+	SelectionMarkerMaxScale        = 1.9f;
+	SelectionMarkerDistanceScale   = 2200.0f;
+	SelectionMarkerBoundsPadding   = 0.5f;
+
+	// Identity defaults
+	ColorTokenIndex    = INDEX_NONE;
+	TokenColor         = FLinearColor(0.8f, 0.8f, 0.8f, 1.0f);
+	SelectionRingColor = FLinearColor(0.1f, 1.0f, 0.2f, 1.0f);
+
+	// Runtime state
+	CurrentWaypoint       = FVector::ZeroVector;
+	bIsSelected           = false;
+	SelectionMarkerAngle  = 0.0f;
+	bEnemyHighlighted     = false;
+	UFOMeshMID            = nullptr;
+	UFODomeMeshMID        = nullptr;
+
+	// Mesh assets
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> CylinderMesh(TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> SphereMesh(TEXT("/Engine/BasicShapes/Sphere.Sphere"));
+
+	SetupMeshComponents(
+		CylinderMesh.Succeeded() ? CylinderMesh.Object : nullptr,
+		SphereMesh.Succeeded()   ? SphereMesh.Object   : nullptr);
+
+	SetupSelectionRing(
+		CylinderMesh.Succeeded() ? CylinderMesh.Object : nullptr);
+}
+
+// ---------------------------------------------------------------------------
+// Constructor helpers
+// ---------------------------------------------------------------------------
+
+void ANPCUFOPawn::SetupMeshComponents(const UStaticMesh* CylinderMesh, const UStaticMesh* SphereMesh)
+{
+	// --- Saucer body (root) ---
 	UFOMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("UFOMesh"));
 	RootComponent = UFOMesh;
 	UFOMesh->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
@@ -43,84 +94,92 @@ ANPCUFOPawn::ANPCUFOPawn()
 	UFOMesh->SetCollisionResponseToChannel(ECC_Visibility, ECR_Block);
 	UFOMesh->SetMobility(EComponentMobility::Movable);
 
-	static ConstructorHelpers::FObjectFinder<UStaticMesh> CylinderMesh(TEXT("/Engine/BasicShapes/Cylinder.Cylinder"));
-	static ConstructorHelpers::FObjectFinder<UStaticMesh> SphereMesh(TEXT("/Engine/BasicShapes/Sphere.Sphere"));
-
-	if (CylinderMesh.Succeeded())
+	if (CylinderMesh)
 	{
-		UFOMesh->SetStaticMesh(CylinderMesh.Object);
-		UFOMesh->SetRelativeScale3D(FVector(2.2f, 2.2f, 0.22f));
+		UFOMesh->SetStaticMesh(const_cast<UStaticMesh*>(CylinderMesh));
+		UFOMesh->SetRelativeScale3D(FVector(
+			NPCUFOPawnConstants::SaucerScaleXY,
+			NPCUFOPawnConstants::SaucerScaleXY,
+			NPCUFOPawnConstants::SaucerScaleZ));
 	}
 
-	// Dome on top
+	// --- Glass dome ---
 	UFODomeMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("UFODomeMesh"));
 	UFODomeMesh->SetupAttachment(UFOMesh);
 	UFODomeMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	UFODomeMesh->SetMobility(EComponentMobility::Movable);
-	if (SphereMesh.Succeeded())
-	{
-		UFODomeMesh->SetStaticMesh(SphereMesh.Object);
-		UFODomeMesh->SetRelativeLocation(FVector(0.0f, 0.0f, 45.0f));
-		UFODomeMesh->SetRelativeScale3D(FVector(1.0f, 1.0f, 0.35f));
-	}
 
+	if (SphereMesh)
+	{
+		UFODomeMesh->SetStaticMesh(const_cast<UStaticMesh*>(SphereMesh));
+		UFODomeMesh->SetRelativeLocation(FVector(0.0f, 0.0f, NPCUFOPawnConstants::DomeOffsetZ));
+		UFODomeMesh->SetRelativeScale3D(FVector(1.0f, 1.0f, NPCUFOPawnConstants::DomeScaleZ));
+	}
+}
+
+void ANPCUFOPawn::SetupSelectionRing(const UStaticMesh* CylinderMesh)
+{
+	// Pivot that bills toward the camera
 	SelectionMarkerRoot = CreateDefaultSubobject<USceneComponent>(TEXT("SelectionMarkerRoot"));
 	SelectionMarkerRoot->SetupAttachment(UFOMesh);
-	SelectionMarkerRoot->SetRelativeLocation(FVector(0.0f, 0.0f, 170.0f));
-	SelectionMarkerRoot->SetRelativeScale3D(FVector::OneVector);
+	SelectionMarkerRoot->SetRelativeLocation(FVector(0.0f, 0.0f, NPCUFOPawnConstants::MarkerPivotZ));
 
+	// Child that actually spins
 	SelectionMarkerSpinRoot = CreateDefaultSubobject<USceneComponent>(TEXT("SelectionMarkerSpinRoot"));
 	SelectionMarkerSpinRoot->SetupAttachment(SelectionMarkerRoot);
 
-	UMaterialInterface* MarkerBaseMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/Engine/BasicShapes/BasicShapeMaterial"));
+	if (!CylinderMesh) return;
+
+	// Shared emissive MID for all segments
 	UMaterialInstanceDynamic* MarkerMID = nullptr;
-	if (MarkerBaseMaterial)
+	if (UMaterialInterface* Base = LoadObject<UMaterialInterface>(
+		nullptr, UTF8_TO_TCHAR(NPCUFOPawnConstants::BasicShapeMaterialPath)))
 	{
-		MarkerMID = UMaterialInstanceDynamic::Create(MarkerBaseMaterial, this);
+		MarkerMID = UMaterialInstanceDynamic::Create(Base, this);
 		if (MarkerMID)
 		{
-			MarkerMID->SetVectorParameterValue(FName("Color"), SelectionRingColor);
-			MarkerMID->SetVectorParameterValue(FName("BaseColor"), SelectionRingColor);
-			MarkerMID->SetVectorParameterValue(FName("EmissiveColor"), SelectionRingColor * 14.0f);
+			MarkerMID->SetVectorParameterValue(FName("Color"),        SelectionRingColor);
+			MarkerMID->SetVectorParameterValue(FName("BaseColor"),    SelectionRingColor);
+			MarkerMID->SetVectorParameterValue(FName("EmissiveColor"),
+				SelectionRingColor * NPCUFOPawnConstants::RingEmissiveScale);
 		}
 	}
 
-	if (CylinderMesh.Succeeded())
+	const int32 Count = NPCUFOPawnConstants::RingSegmentCount;
+	for (int32 i = 0; i < Count; ++i)
 	{
-		constexpr int32 SegmentCount = 12;
-		constexpr float RingRadius = 260.0f;
+		const FString Name          = FString::Printf(TEXT("SelectionMarkerSegment_%d"), i);
+		UStaticMeshComponent* Seg   = CreateDefaultSubobject<UStaticMeshComponent>(*Name);
+		Seg->SetupAttachment(SelectionMarkerSpinRoot);
+		Seg->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+		Seg->SetMobility(EComponentMobility::Movable);
+		Seg->SetCastShadow(false);
+		Seg->SetStaticMesh(const_cast<UStaticMesh*>(CylinderMesh));
+		Seg->SetVisibility(false);
 
-		for (int32 SegmentIndex = 0; SegmentIndex < SegmentCount; ++SegmentIndex)
+		const float AngleRad = FMath::DegreesToRadians((360.0f / Count) * i);
+		Seg->SetRelativeLocation(FVector(
+			FMath::Cos(AngleRad) * NPCUFOPawnConstants::RingRadius,
+			FMath::Sin(AngleRad) * NPCUFOPawnConstants::RingRadius,
+			0.0f));
+		Seg->SetRelativeRotation(FRotator(90.0f, FMath::RadiansToDegrees(AngleRad), 0.0f));
+		Seg->SetRelativeScale3D(FVector(
+			NPCUFOPawnConstants::SegmentScaleXY,
+			NPCUFOPawnConstants::SegmentScaleXY,
+			NPCUFOPawnConstants::SegmentScaleZ));
+
+		if (MarkerMID)
 		{
-			const FString SegmentName = FString::Printf(TEXT("SelectionMarkerSegment_%d"), SegmentIndex);
-			UStaticMeshComponent* Segment = CreateDefaultSubobject<UStaticMeshComponent>(*SegmentName);
-			Segment->SetupAttachment(SelectionMarkerSpinRoot);
-			Segment->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-			Segment->SetMobility(EComponentMobility::Movable);
-			Segment->SetCastShadow(false);
-			Segment->SetStaticMesh(CylinderMesh.Object);
-
-			const float AngleRadians = FMath::DegreesToRadians((360.0f / SegmentCount) * SegmentIndex);
-			const FVector SegmentLocation(
-				FMath::Cos(AngleRadians) * RingRadius,
-				FMath::Sin(AngleRadians) * RingRadius,
-				0.0f
-			);
-
-			Segment->SetRelativeLocation(SegmentLocation);
-			Segment->SetRelativeRotation(FRotator(90.0f, FMath::RadiansToDegrees(AngleRadians), 0.0f));
-			Segment->SetRelativeScale3D(FVector(0.05f, 0.05f, 0.28f));
-			Segment->SetVisibility(false);
-
-			if (MarkerMID)
-			{
-				Segment->SetMaterial(0, MarkerMID);
-			}
-
-			SelectionMarkerSegments.Add(Segment);
+			Seg->SetMaterial(0, MarkerMID);
 		}
+
+		SelectionMarkerSegments.Add(Seg);
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
 
 void ANPCUFOPawn::BeginPlay()
 {
@@ -132,118 +191,154 @@ void ANPCUFOPawn::Tick(float DeltaTime)
 {
 	Super::Tick(DeltaTime);
 
-	FVector Location = GetActorLocation();
-	FVector ToWaypoint = CurrentWaypoint - Location;
-	float Distance = ToWaypoint.Size();
+	// --- Wander movement ---
+	const FVector Location  = GetActorLocation();
+	FVector ToWaypoint      = CurrentWaypoint - Location;
+	float   Distance        = ToWaypoint.Size();
 
 	if (Distance < WaypointReachedDistance)
 	{
 		PickNewWaypoint();
 		ToWaypoint = CurrentWaypoint - Location;
-		Distance = ToWaypoint.Size();
+		Distance   = ToWaypoint.Size();
 	}
 
 	if (Distance > 1.0f)
 	{
-		FVector Direction = ToWaypoint / Distance;
-
-		// Smoothly rotate toward waypoint
-		FRotator CurrentRot = GetActorRotation();
-		FRotator TargetRot = Direction.Rotation();
-		FRotator NewRot = FMath::RInterpTo(CurrentRot, TargetRot, DeltaTime, TurnSpeed / 90.0f);
+		const FVector Dir    = ToWaypoint / Distance;
+		const FRotator NewRot = FMath::RInterpTo(
+			GetActorRotation(), Dir.Rotation(), DeltaTime, TurnSpeed / 90.0f);
 		SetActorRotation(NewRot);
-
-		// Move forward
-		FVector NewLocation = Location + Direction * MoveSpeed * DeltaTime;
-		SetActorLocation(NewLocation, true);
+		SetActorLocation(Location + Dir * MoveSpeed * DeltaTime, true);
 	}
 
-	if (bIsSelected && SelectionMarkerRoot)
+	// --- Selection marker ---
+	if (bIsSelected)
 	{
-		SelectionMarkerAngle += SelectionMarkerSpinSpeed * DeltaTime;
-
-		if (SelectionMarkerSpinRoot)
-		{
-			SelectionMarkerSpinRoot->SetRelativeRotation(FRotator(0.0f, SelectionMarkerAngle, 0.0f));
-		}
-
-		if (UWorld* World = GetWorld())
-		{
-			if (APlayerController* PC = World->GetFirstPlayerController())
-			{
-				if (APlayerCameraManager* CameraManager = PC->PlayerCameraManager)
-				{
-					const FVector MarkerLocation = SelectionMarkerRoot->GetComponentLocation();
-					const FVector ToCamera = CameraManager->GetCameraLocation() - MarkerLocation;
-
-					if (!ToCamera.IsNearlyZero())
-					{
-						SelectionMarkerRoot->SetWorldRotation(FRotationMatrix::MakeFromZ(ToCamera.GetSafeNormal()).Rotator());
-					}
-
-					const float DesiredRadius = ComputeSelectionTargetRadius() * SelectionMarkerBoundsPadding;
-					const float MarkerScale = FMath::Clamp(
-						DesiredRadius / 260.0f,
-						SelectionMarkerMinScale,
-						SelectionMarkerMaxScale
-					);
-					SelectionMarkerRoot->SetWorldScale3D(FVector(MarkerScale));
-				}
-			}
-		}
+		UpdateSelectionMarker(DeltaTime);
 	}
 }
 
-float ANPCUFOPawn::ComputeSelectionTargetRadius() const
+// ---------------------------------------------------------------------------
+// Private helpers
+// ---------------------------------------------------------------------------
+
+void ANPCUFOPawn::UpdateSelectionMarker(float DeltaTime)
 {
-	FBox CombinedBounds(ForceInit);
+	if (!SelectionMarkerRoot) return;
 
-	if (UFOMesh)
+	// Spin the ring
+	SelectionMarkerAngle += SelectionMarkerSpinSpeed * DeltaTime;
+	if (SelectionMarkerSpinRoot)
 	{
-		CombinedBounds += UFOMesh->Bounds.GetBox();
+		SelectionMarkerSpinRoot->SetRelativeRotation(FRotator(0.0f, SelectionMarkerAngle, 0.0f));
 	}
 
-	if (UFODomeMesh)
+	// Billboard toward camera and scale by apparent UFO size
+	UWorld* World = GetWorld();
+	if (!World) return;
+
+	APlayerController* PC = World->GetFirstPlayerController();
+	if (!PC || !PC->PlayerCameraManager) return;
+
+	const FVector MarkerLocation = SelectionMarkerRoot->GetComponentLocation();
+	const FVector ToCamera       = PC->PlayerCameraManager->GetCameraLocation() - MarkerLocation;
+
+	if (!ToCamera.IsNearlyZero())
 	{
-		CombinedBounds += UFODomeMesh->Bounds.GetBox();
+		SelectionMarkerRoot->SetWorldRotation(
+			FRotationMatrix::MakeFromZ(ToCamera.GetSafeNormal()).Rotator());
 	}
 
-	if (!CombinedBounds.IsValid)
-	{
-		return 260.0f;
-	}
-
-	return CombinedBounds.GetExtent().GetAbsMax();
+	const float DesiredRadius = ComputeSelectionTargetRadius() * SelectionMarkerBoundsPadding;
+	const float MarkerScale   = FMath::Clamp(
+		DesiredRadius / NPCUFOPawnConstants::RingRadius,
+		SelectionMarkerMinScale,
+		SelectionMarkerMaxScale);
+	SelectionMarkerRoot->SetWorldScale3D(FVector(MarkerScale));
 }
 
 void ANPCUFOPawn::PickNewWaypoint()
 {
-	FVector Origin = FVector::ZeroVector; // Wander around the arena center
-	FVector RandomOffset = FMath::VRand() * FMath::FRandRange(WanderRadius * 0.3f, WanderRadius);
-	CurrentWaypoint = Origin + RandomOffset;
+	CurrentWaypoint = FMath::VRand() * FMath::FRandRange(WanderRadius * 0.3f, WanderRadius);
 }
+
+float ANPCUFOPawn::ComputeSelectionTargetRadius() const
+{
+	FBox Bounds(ForceInit);
+	if (UFOMesh)     { Bounds += UFOMesh->Bounds.GetBox(); }
+	if (UFODomeMesh) { Bounds += UFODomeMesh->Bounds.GetBox(); }
+
+	return Bounds.IsValid ? Bounds.GetExtent().GetAbsMax() : NPCUFOPawnConstants::RingRadius;
+}
+
+void ANPCUFOPawn::EnsureAndApplyMID(
+	UStaticMeshComponent*     MeshComp,
+	UMaterialInstanceDynamic*& CachedMID,
+	const FLinearColor&        Color,
+	float                      EmissiveScale)
+{
+	if (!MeshComp) return;
+
+	if (!CachedMID)
+	{
+		UMaterialInterface* Base = MeshComp->GetMaterial(0);
+		if (!Base)
+		{
+			Base = LoadObject<UMaterialInterface>(
+				nullptr, UTF8_TO_TCHAR(NPCUFOPawnConstants::BasicShapeMaterialPath));
+		}
+		if (!Base) return;
+
+		CachedMID = UMaterialInstanceDynamic::Create(Base, this);
+		if (CachedMID)
+		{
+			MeshComp->SetMaterial(0, CachedMID);
+		}
+	}
+
+	if (!CachedMID) return;
+
+	CachedMID->SetVectorParameterValue(FName("Color"),        Color);
+	CachedMID->SetVectorParameterValue(FName("BaseColor"),    Color);
+	CachedMID->SetVectorParameterValue(FName("EmissiveColor"), Color * EmissiveScale);
+	CachedMID->SetScalarParameterValue(FName("Metallic"),      0.0f);
+	CachedMID->SetScalarParameterValue(FName("Roughness"),     0.35f);
+}
+
+void ANPCUFOPawn::UpdateBodyColorFromState()
+{
+	const FLinearColor DisplayColor = bEnemyHighlighted
+		? NPCUFOPawnConstants::EnemyBodyColor
+		: TokenColor;
+
+	EnsureAndApplyMID(UFOMesh,     UFOMeshMID,     DisplayColor, NPCUFOPawnConstants::EnemyEmissiveScale);
+	EnsureAndApplyMID(UFODomeMesh, UFODomeMeshMID, DisplayColor, NPCUFOPawnConstants::EnemyEmissiveScale);
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
 
 void ANPCUFOPawn::SetSelected(bool bInSelected)
 {
 	bIsSelected = bInSelected;
+
 	if (!bIsSelected && SelectionMarkerRoot)
 	{
 		SelectionMarkerRoot->SetRelativeScale3D(FVector::OneVector);
 	}
 
-	for (UStaticMeshComponent* Segment : SelectionMarkerSegments)
+	for (UStaticMeshComponent* Seg : SelectionMarkerSegments)
 	{
-		if (Segment)
-		{
-			Segment->SetVisibility(bIsSelected);
-		}
+		if (Seg) { Seg->SetVisibility(bIsSelected); }
 	}
 }
 
 void ANPCUFOPawn::SetColorToken(int32 InColorTokenIndex, const FLinearColor& InTokenColor)
 {
 	ColorTokenIndex = InColorTokenIndex;
-	TokenColor = InTokenColor;
+	TokenColor      = InTokenColor;
 	UpdateBodyColorFromState();
 }
 
@@ -253,90 +348,33 @@ void ANPCUFOPawn::SetEnemyHighlighted(bool bInEnemyHighlighted)
 	UpdateBodyColorFromState();
 }
 
-void ANPCUFOPawn::UpdateBodyColorFromState()
-{
-	const FLinearColor DisplayColor = bEnemyHighlighted
-		? FLinearColor(1.0f, 0.26f, 0.26f, 1.0f)
-		: TokenColor;
-
-	auto EnsureAndApplyMID = [&](UStaticMeshComponent* MeshComp, UMaterialInstanceDynamic*& CachedMID, float EmissiveScale)
-	{
-		if (!MeshComp)
-		{
-			return;
-		}
-
-		if (!CachedMID)
-		{
-			UMaterialInterface* BaseMaterial = MeshComp->GetMaterial(0);
-			if (!BaseMaterial)
-			{
-				BaseMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/Engine/BasicShapes/BasicShapeMaterial"));
-			}
-
-			if (!BaseMaterial)
-			{
-				return;
-			}
-
-			CachedMID = UMaterialInstanceDynamic::Create(BaseMaterial, this);
-			if (CachedMID)
-			{
-				MeshComp->SetMaterial(0, CachedMID);
-			}
-		}
-
-		if (!CachedMID)
-		{
-			return;
-		}
-
-		CachedMID->SetVectorParameterValue(FName("Color"), DisplayColor);
-		CachedMID->SetVectorParameterValue(FName("BaseColor"), DisplayColor);
-		CachedMID->SetVectorParameterValue(FName("EmissiveColor"), DisplayColor * EmissiveScale);
-		CachedMID->SetScalarParameterValue(FName("Metallic"), 0.0f);
-		CachedMID->SetScalarParameterValue(FName("Roughness"), 0.35f);
-	};
-
-	EnsureAndApplyMID(UFOMesh, UFOMeshMID, 2.0f);
-	EnsureAndApplyMID(UFODomeMesh, UFODomeMeshMID, 2.0f);
-}
-
 void ANPCUFOPawn::SetSelectionRingColor(const FLinearColor& InRingColor)
 {
 	SelectionRingColor = InRingColor;
-	for (UStaticMeshComponent* Segment : SelectionMarkerSegments)
-	{
-		if (!Segment)
-		{
-			continue;
-		}
 
-		UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(Segment->GetMaterial(0));
+	for (UStaticMeshComponent* Seg : SelectionMarkerSegments)
+	{
+		if (!Seg) continue;
+
+		UMaterialInstanceDynamic* MID = Cast<UMaterialInstanceDynamic>(Seg->GetMaterial(0));
 		if (!MID)
 		{
-			UMaterialInterface* BaseMaterial = Segment->GetMaterial(0);
-			if (!BaseMaterial)
+			UMaterialInterface* Base = Seg->GetMaterial(0);
+			if (!Base)
 			{
-				BaseMaterial = LoadObject<UMaterialInterface>(nullptr, TEXT("/Engine/BasicShapes/BasicShapeMaterial"));
+				Base = LoadObject<UMaterialInterface>(
+					nullptr, UTF8_TO_TCHAR(NPCUFOPawnConstants::BasicShapeMaterialPath));
 			}
+			if (!Base) continue;
 
-			if (!BaseMaterial)
-			{
-				continue;
-			}
-
-			MID = UMaterialInstanceDynamic::Create(BaseMaterial, this);
-			if (!MID)
-			{
-				continue;
-			}
-
-			Segment->SetMaterial(0, MID);
+			MID = UMaterialInstanceDynamic::Create(Base, this);
+			if (!MID) continue;
+			Seg->SetMaterial(0, MID);
 		}
 
-		MID->SetVectorParameterValue(FName("Color"), SelectionRingColor);
-		MID->SetVectorParameterValue(FName("BaseColor"), SelectionRingColor);
-		MID->SetVectorParameterValue(FName("EmissiveColor"), SelectionRingColor * 14.0f);
+		MID->SetVectorParameterValue(FName("Color"),        SelectionRingColor);
+		MID->SetVectorParameterValue(FName("BaseColor"),    SelectionRingColor);
+		MID->SetVectorParameterValue(FName("EmissiveColor"),
+			SelectionRingColor * NPCUFOPawnConstants::RingEmissiveScale);
 	}
 }
