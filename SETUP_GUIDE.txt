@@ -1,0 +1,10 @@
+UFO Unreal Project - Setup Guide
+=================================
+
+1. Install Unreal Engine 5.x from Epic Games Launcher
+2. Install Visual Studio 2022 with "Game Development with C++" workload
+3. Clone this repo:
+   git clone https://github.com/w2lf/UFO.git
+4. Right-click UFO.uproject -> Generate Visual Studio project files
+5. Open UFO.sln -> Build -> Development Editor -> Win64
+6. Launch UFO.uproject in Unreal Engine
