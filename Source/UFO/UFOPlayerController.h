@@ -11,6 +11,7 @@ class AUFOPawn;
 class ANPCUFOPawn;
 class ATargetCaptureActor;
 class UTargetViewWidget;
+class UFireButtonWidget;
 
 /**
  * AUFOPlayerController
@@ -20,6 +21,7 @@ class UTargetViewWidget;
  *  - NPC selection: highlight selected NPC with a colour ring
  *  - Per-frame    : refresh enemy highlights and token billboards
  *  - Target view  : live 3-D scene capture preview of the selected NPC (top-left HUD)
+ *  - Firing       : shoot a laser projectile at the selected enemy NPC
  */
 UCLASS()
 class UFO_API AUFOPlayerController : public APlayerController
@@ -42,11 +44,14 @@ public:
 	/** Select the NPC that belongs to a given token index and dock side */
 	void SelectNPCForToken(int32 TokenIndex, EColorDockSide PreferredDockSide);
 
+	/** Fire a laser projectile toward SelectedNPC (called by FireButtonWidget) */
+	UFUNCTION(BlueprintCallable, Category = "Combat")
+	void FireLaserAtSelectedNPC();
+
 	// -----------------------------------------------------------------------
 	// Protected state
 	// -----------------------------------------------------------------------
 protected:
-	/** Timer used to wait for the pawn to be possessed before caching it */
 	FTimerHandle PawnCheckTimer;
 
 	UPROPERTY(BlueprintReadOnly, Category = "UFO")
@@ -58,67 +63,45 @@ protected:
 	UPROPERTY(BlueprintReadOnly, Category = "Selection")
 	ANPCUFOPawn* SelectedNPC;
 
-	/** Maximum screen-space distance (px) for proximity-based NPC selection */
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Selection")
 	float MaxSelectionScreenDistance;
 
-	/** The actor that orbits the selected NPC and captures its 3-D view */
 	UPROPERTY(BlueprintReadOnly, Category = "Target View")
 	ATargetCaptureActor* TargetCaptureActor;
 
-	/** HUD widget that shows the live capture in the top-left corner */
 	UPROPERTY(BlueprintReadOnly, Category = "Target View")
 	UTargetViewWidget* TargetViewWidget;
+
+	UPROPERTY(BlueprintReadOnly, Category = "Combat")
+	UFireButtonWidget* FireButtonWidget;
+
+	/** Minimum seconds between shots */
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Combat")
+	float FireCooldown = 0.4f;
 
 	// -----------------------------------------------------------------------
 	// Private helpers
 	// -----------------------------------------------------------------------
 private:
-	/** Called once the pawn is ready — caches UFOPawn and creates the UI */
 	void OnPawnReady();
-
-	/** Creates and adds the TrackballUI widget to the viewport */
 	void CreateTrackballUI();
-
-	/** Spawns the ATargetCaptureActor into the world */
 	void SpawnTargetCaptureActor();
-
-	/** Creates and adds the TargetViewWidget to the viewport */
 	void CreateTargetViewUI();
-
-	/** Updates the capture actor and widget to reflect SelectedNPC */
+	void CreateFireButtonUI();
 	void RefreshTargetPreview();
 
-	/** Touch press handler — finds and selects the tapped NPC */
 	void OnTouchPressed(ETouchIndex::Type FingerIndex, FVector Location);
-
-	/** Sets SelectedNPC and applies the appropriate selection ring colour */
 	void SelectNPC(ANPCUFOPawn* NewSelection);
 
-	/**
-	 * Finds the best NPC near ScreenPosition.
-	 * First tries a direct raycast; falls back to nearest projected NPC.
-	 */
 	ANPCUFOPawn* FindBestNPCAtScreenPosition(const FVector2D& ScreenPosition) const;
-
-	/** Raycast helper — returns the NPC directly under ScreenPosition, or nullptr */
 	ANPCUFOPawn* RaycastNPCAtScreen(const FVector2D& ScreenPosition) const;
-
-	/** Proximity helper — returns the nearest on-screen NPC within MaxSelectionScreenDistance */
 	ANPCUFOPawn* FindNearestNPCOnScreen(const FVector2D& ScreenPosition) const;
 
-	/** Returns true if NPC has a valid dock assignment and can be selected */
-	bool IsNPCSelectableFromDock(const ANPCUFOPawn* NPC) const;
-
-	/** Returns Enemy / Friendly / None for the given NPC based on the trackball dock */
+	bool           IsNPCSelectableFromDock(const ANPCUFOPawn* NPC) const;
 	EColorDockSide GetDockSideForNPC(const ANPCUFOPawn* NPC) const;
+	void           ApplyNPCSelectionVisuals(ANPCUFOPawn* NPC, EColorDockSide DockSide) const;
+	void           RefreshNPCEnemyHighlighting() const;
+	void           RefreshTokenSelectedBillboards() const;
 
-	/** Applies the correct selection ring colour and selected state to an NPC */
-	void ApplyNPCSelectionVisuals(ANPCUFOPawn* NPC, EColorDockSide DockSide) const;
-
-	/** Per-frame: marks every NPC as enemy-highlighted or not */
-	void RefreshNPCEnemyHighlighting() const;
-
-	/** Per-frame: updates selection ring colour for all token-assigned NPCs */
-	void RefreshTokenSelectedBillboards() const;
+	float LastFireTime = -1.0f;
 };

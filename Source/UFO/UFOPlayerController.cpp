@@ -6,6 +6,8 @@
 #include "TrackballUI.h"
 #include "TargetCaptureActor.h"
 #include "TargetViewWidget.h"
+#include "FireButtonWidget.h"
+#include "LaserProjectile.h"
 #include "Blueprint/UserWidget.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
@@ -17,14 +19,9 @@
 // ---------------------------------------------------------------------------
 namespace UFOControllerConstants
 {
-	/** Colour used for the selection ring on enemy NPCs */
 	const FLinearColor EnemyRingColor    = FLinearColor(1.0f, 0.22f, 0.22f, 1.0f);
-
-	/** Colour used for the selection ring on friendly NPCs */
-	const FLinearColor FriendlyRingColor = FLinearColor(0.1f, 1.0f, 0.2f, 1.0f);
-
-	/** Seconds after BeginPlay before we try to cache the possessed pawn */
-	constexpr float PawnCheckDelay = 0.1f;
+	const FLinearColor FriendlyRingColor = FLinearColor(0.1f,  1.0f,  0.2f, 1.0f);
+	constexpr float    PawnCheckDelay    = 0.1f;
 }
 
 // ---------------------------------------------------------------------------
@@ -34,10 +31,12 @@ AUFOPlayerController::AUFOPlayerController()
 {
 	bReplicates = true;
 	bAutoManageActiveCameraTarget = true;
-	SelectedNPC     = nullptr;
+	SelectedNPC        = nullptr;
 	TargetCaptureActor = nullptr;
 	TargetViewWidget   = nullptr;
+	FireButtonWidget   = nullptr;
 	MaxSelectionScreenDistance = 180.0f;
+	LastFireTime       = -1.0f;
 }
 
 // ---------------------------------------------------------------------------
@@ -57,15 +56,13 @@ void AUFOPlayerController::BeginPlay()
 {
 	Super::BeginPlay();
 
-	// Allow both game and UI to receive input; show the cursor for touch selection
 	FInputModeGameAndUI InputMode;
 	InputMode.SetHideCursorDuringCapture(false);
 	SetInputMode(InputMode);
-	bShowMouseCursor  = true;
+	bShowMouseCursor   = true;
 	bEnableClickEvents = true;
 	bEnableTouchEvents = true;
 
-	// The pawn may not be possessed yet — wait one frame then cache it
 	GetWorld()->GetTimerManager().SetTimer(
 		PawnCheckTimer,
 		this,
@@ -82,7 +79,7 @@ void AUFOPlayerController::Tick(float DeltaSeconds)
 }
 
 // ---------------------------------------------------------------------------
-// Initialisation helpers
+// Initialisation
 // ---------------------------------------------------------------------------
 
 void AUFOPlayerController::OnPawnReady()
@@ -94,11 +91,12 @@ void AUFOPlayerController::OnPawnReady()
 		CreateTrackballUI();
 		SpawnTargetCaptureActor();
 		CreateTargetViewUI();
+		CreateFireButtonUI();
 		UE_LOG(LogTemp, Warning, TEXT("AUFOPlayerController: Pawn ready, UI created."));
 	}
 	else
 	{
-		UE_LOG(LogTemp, Error, TEXT("AUFOPlayerController: Pawn not found after delay!"));
+		UE_LOG(LogTemp, Error, TEXT("AUFOPlayerController: Pawn not found!"));
 	}
 }
 
@@ -111,10 +109,6 @@ void AUFOPlayerController::CreateTrackballUI()
 	{
 		TrackballWidget->SetVisibility(ESlateVisibility::Visible);
 		TrackballWidget->AddToViewport(100);
-	}
-	else
-	{
-		UE_LOG(LogTemp, Error, TEXT("AUFOPlayerController: Failed to create TrackballUI."));
 	}
 }
 
@@ -143,9 +137,16 @@ void AUFOPlayerController::CreateTargetViewUI()
 		TargetViewWidget->AddToViewport(110);
 		TargetViewWidget->SetPreviewVisible(false);
 	}
-	else
+}
+
+void AUFOPlayerController::CreateFireButtonUI()
+{
+	if (!GetLocalPlayer() || FireButtonWidget) return;
+
+	FireButtonWidget = CreateWidget<UFireButtonWidget>(this, UFireButtonWidget::StaticClass());
+	if (FireButtonWidget)
 	{
-		UE_LOG(LogTemp, Error, TEXT("AUFOPlayerController: Failed to create TargetViewWidget."));
+		FireButtonWidget->AddToViewport(110);
 	}
 }
 
@@ -163,6 +164,44 @@ void AUFOPlayerController::RefreshTargetPreview()
 }
 
 // ---------------------------------------------------------------------------
+// Combat
+// ---------------------------------------------------------------------------
+
+void AUFOPlayerController::FireLaserAtSelectedNPC()
+{
+	// Must have a valid enemy target
+	if (!IsValid(SelectedNPC)) return;
+	if (GetDockSideForNPC(SelectedNPC) != EColorDockSide::Enemy) return;
+	if (!UFOPawn || !GetWorld()) return;
+
+	// Enforce cooldown
+	const float Now = GetWorld()->GetTimeSeconds();
+	if ((Now - LastFireTime) < FireCooldown) return;
+	LastFireTime = Now;
+
+	// Spawn at the UFO's location, aimed at the target
+	const FVector  SpawnLocation  = UFOPawn->GetActorLocation();
+	const FVector  ToTarget       = (SelectedNPC->GetActorLocation() - SpawnLocation).GetSafeNormal();
+	const FRotator SpawnRotation  = ToTarget.Rotation();
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.Owner   = UFOPawn;
+	SpawnParams.Instigator = GetPawn();
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	ALaserProjectile* Laser = GetWorld()->SpawnActor<ALaserProjectile>(
+		ALaserProjectile::StaticClass(),
+		SpawnLocation,
+		SpawnRotation,
+		SpawnParams);
+
+	if (Laser)
+	{
+		Laser->SetTarget(SelectedNPC);
+	}
+}
+
+// ---------------------------------------------------------------------------
 // Touch / Selection
 // ---------------------------------------------------------------------------
 
@@ -170,7 +209,6 @@ void AUFOPlayerController::OnTouchPressed(ETouchIndex::Type FingerIndex, FVector
 {
 	FVector2D ScreenPosition(Location.X, Location.Y);
 
-	// Some platforms report zero on the first event — fall back to the input state
 	if (ScreenPosition.IsNearlyZero())
 	{
 		float ScreenX = 0.0f, ScreenY = 0.0f;
@@ -222,30 +260,17 @@ void AUFOPlayerController::SelectNPCForToken(int32 TokenIndex, EColorDockSide Pr
 
 ANPCUFOPawn* AUFOPlayerController::FindBestNPCAtScreenPosition(const FVector2D& ScreenPosition) const
 {
-	// 1. Try a direct raycast first (most accurate)
-	if (ANPCUFOPawn* Hit = RaycastNPCAtScreen(ScreenPosition))
-	{
-		return Hit;
-	}
-
-	// 2. Fall back to the nearest projected NPC within the distance threshold
+	if (ANPCUFOPawn* Hit = RaycastNPCAtScreen(ScreenPosition)) return Hit;
 	return FindNearestNPCOnScreen(ScreenPosition);
 }
 
 ANPCUFOPawn* AUFOPlayerController::RaycastNPCAtScreen(const FVector2D& ScreenPosition) const
 {
 	FHitResult HitResult;
-	if (!GetHitResultAtScreenPosition(ScreenPosition, ECC_Visibility, true, HitResult))
-	{
-		return nullptr;
-	}
+	if (!GetHitResultAtScreenPosition(ScreenPosition, ECC_Visibility, true, HitResult)) return nullptr;
 
 	ANPCUFOPawn* HitNPC = Cast<ANPCUFOPawn>(HitResult.GetActor());
-	if (HitNPC && IsNPCSelectableFromDock(HitNPC))
-	{
-		return HitNPC;
-	}
-	return nullptr;
+	return (HitNPC && IsNPCSelectableFromDock(HitNPC)) ? HitNPC : nullptr;
 }
 
 ANPCUFOPawn* AUFOPlayerController::FindNearestNPCOnScreen(const FVector2D& ScreenPosition) const
@@ -301,20 +326,16 @@ void AUFOPlayerController::ApplyNPCSelectionVisuals(ANPCUFOPawn* NPC, EColorDock
 bool AUFOPlayerController::IsNPCSelectableFromDock(const ANPCUFOPawn* NPC) const
 {
 	if (!NPC || !TrackballWidget) return true;
-
 	const int32 TokenIndex = NPC->GetColorTokenIndex();
 	if (TokenIndex == INDEX_NONE) return true;
-
 	return TrackballWidget->GetDockAssignmentForToken(TokenIndex) != EColorDockSide::None;
 }
 
 EColorDockSide AUFOPlayerController::GetDockSideForNPC(const ANPCUFOPawn* NPC) const
 {
 	if (!NPC || !TrackballWidget) return EColorDockSide::None;
-
 	const int32 TokenIndex = NPC->GetColorTokenIndex();
 	if (TokenIndex == INDEX_NONE) return EColorDockSide::None;
-
 	return TrackballWidget->GetPreferredDockForToken(TokenIndex);
 }
 
