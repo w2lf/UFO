@@ -9,6 +9,8 @@
 
 class AUFOPawn;
 class ANPCUFOPawn;
+class ATargetCaptureActor;
+class UTargetViewWidget;
 
 /**
  * AUFOPlayerController
@@ -17,6 +19,7 @@ class ANPCUFOPawn;
  *  - Touch input  : tap to select an NPC
  *  - NPC selection: highlight selected NPC with a colour ring
  *  - Per-frame    : refresh enemy highlights and token billboards
+ *  - Target view  : live 3-D scene capture preview of the selected NPC (top-left HUD)
  */
 UCLASS()
 class UFO_API AUFOPlayerController : public APlayerController
@@ -59,6 +62,14 @@ protected:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Selection")
 	float MaxSelectionScreenDistance;
 
+	/** The actor that orbits the selected NPC and captures its 3-D view */
+	UPROPERTY(BlueprintReadOnly, Category = "Target View")
+	ATargetCaptureActor* TargetCaptureActor;
+
+	/** HUD widget that shows the live capture in the top-left corner */
+	UPROPERTY(BlueprintReadOnly, Category = "Target View")
+	UTargetViewWidget* TargetViewWidget;
+
 	// -----------------------------------------------------------------------
 	// Private helpers
 	// -----------------------------------------------------------------------
@@ -68,6 +79,15 @@ private:
 
 	/** Creates and adds the TrackballUI widget to the viewport */
 	void CreateTrackballUI();
+
+	/** Spawns the ATargetCaptureActor into the world */
+	void SpawnTargetCaptureActor();
+
+	/** Creates and adds the TargetViewWidget to the viewport */
+	void CreateTargetViewUI();
+
+	/** Updates the capture actor and widget to reflect SelectedNPC */
+	void RefreshTargetPreview();
 
 	/** Touch press handler — finds and selects the tapped NPC */
 	void OnTouchPressed(ETouchIndex::Type FingerIndex, FVector Location);

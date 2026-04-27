@@ -4,6 +4,8 @@
 #include "UFOPawn.h"
 #include "NPCUFOPawn.h"
 #include "TrackballUI.h"
+#include "TargetCaptureActor.h"
+#include "TargetViewWidget.h"
 #include "Blueprint/UserWidget.h"
 #include "TimerManager.h"
 #include "Engine/World.h"
@@ -32,7 +34,9 @@ AUFOPlayerController::AUFOPlayerController()
 {
 	bReplicates = true;
 	bAutoManageActiveCameraTarget = true;
-	SelectedNPC = nullptr;
+	SelectedNPC     = nullptr;
+	TargetCaptureActor = nullptr;
+	TargetViewWidget   = nullptr;
 	MaxSelectionScreenDistance = 180.0f;
 }
 
@@ -88,6 +92,8 @@ void AUFOPlayerController::OnPawnReady()
 	{
 		SetViewTarget(UFOPawn);
 		CreateTrackballUI();
+		SpawnTargetCaptureActor();
+		CreateTargetViewUI();
 		UE_LOG(LogTemp, Warning, TEXT("AUFOPlayerController: Pawn ready, UI created."));
 	}
 	else
@@ -109,6 +115,50 @@ void AUFOPlayerController::CreateTrackballUI()
 	else
 	{
 		UE_LOG(LogTemp, Error, TEXT("AUFOPlayerController: Failed to create TrackballUI."));
+	}
+}
+
+void AUFOPlayerController::SpawnTargetCaptureActor()
+{
+	if (TargetCaptureActor || !GetWorld()) return;
+
+	FActorSpawnParameters SpawnParams;
+	SpawnParams.Owner = this;
+	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+
+	TargetCaptureActor = GetWorld()->SpawnActor<ATargetCaptureActor>(
+		ATargetCaptureActor::StaticClass(),
+		FVector::ZeroVector,
+		FRotator::ZeroRotator,
+		SpawnParams);
+}
+
+void AUFOPlayerController::CreateTargetViewUI()
+{
+	if (!GetLocalPlayer() || TargetViewWidget) return;
+
+	TargetViewWidget = CreateWidget<UTargetViewWidget>(this, UTargetViewWidget::StaticClass());
+	if (TargetViewWidget)
+	{
+		TargetViewWidget->AddToViewport(110);
+		TargetViewWidget->SetPreviewVisible(false);
+	}
+	else
+	{
+		UE_LOG(LogTemp, Error, TEXT("AUFOPlayerController: Failed to create TargetViewWidget."));
+	}
+}
+
+void AUFOPlayerController::RefreshTargetPreview()
+{
+	if (!TargetCaptureActor) return;
+
+	TargetCaptureActor->SetTarget(SelectedNPC);
+
+	if (TargetViewWidget)
+	{
+		TargetViewWidget->SetRenderTarget(
+			SelectedNPC ? TargetCaptureActor->GetRenderTarget() : nullptr);
 	}
 }
 
@@ -142,6 +192,8 @@ void AUFOPlayerController::SelectNPC(ANPCUFOPawn* NewSelection)
 	{
 		ApplyNPCSelectionVisuals(SelectedNPC, GetDockSideForNPC(SelectedNPC));
 	}
+
+	RefreshTargetPreview();
 }
 
 void AUFOPlayerController::SelectNPCForToken(int32 TokenIndex, EColorDockSide PreferredDockSide)
