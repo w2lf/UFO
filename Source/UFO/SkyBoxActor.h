@@ -9,7 +9,7 @@
 class UStaticMeshComponent;
 
 /**
- * Skybox actor - a large sphere with black space and stars material
+ * Skybox actor - uses the engine's built-in SM_SkySphere mesh with M_Star material
  */
 UCLASS()
 class UFO_API ASkyBoxActor : public AActor
@@ -33,5 +33,4 @@ protected:
 
 private:
 	void ApplySkyboxScale();
-	void CreateSkyboxMaterial();
 };
