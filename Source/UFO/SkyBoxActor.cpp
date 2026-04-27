@@ -3,35 +3,40 @@
 #include "SkyBoxActor.h"
 #include "Components/StaticMeshComponent.h"
 #include "Materials/Material.h"
-#include "Materials/MaterialInstanceDynamic.h"
 
 ASkyBoxActor::ASkyBoxActor()
 {
 	PrimaryActorTick.bCanEverTick = false;
-	SkyboxRadius = 50000.0f; // Very large sphere
+	SkyboxRadius = 50000.0f;
 
-	// Create mesh
+	// Create mesh component
 	SkyMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("SkyMesh"));
 	RootComponent = SkyMesh;
 
-	// Load sphere mesh
-	static ConstructorHelpers::FObjectFinder<UStaticMesh> SphereMesh(TEXT("/Engine/BasicShapes/Sphere"));
-	if (SphereMesh.Succeeded())
+	// Use the engine's built-in sky sphere mesh (same one BP_Sky_Sphere uses)
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> SkySphere(TEXT("/Engine/EngineSky/SM_SkySphere"));
+	if (SkySphere.Succeeded())
 	{
-		SkyMesh->SetStaticMesh(SphereMesh.Object);
+		SkyMesh->SetStaticMesh(SkySphere.Object);
 	}
 
-	// Set collision
+	// Apply M_Star material from the Content folder
+	static ConstructorHelpers::FObjectFinder<UMaterial> StarMaterial(TEXT("/Game/M_Star"));
+	if (StarMaterial.Succeeded())
+	{
+		SkyMesh->SetMaterial(0, StarMaterial.Object);
+	}
+
+	// No collision, no shadow
 	SkyMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	SkyMesh->CastShadow = false;
+
 	ApplySkyboxScale();
 }
 
 void ASkyBoxActor::BeginPlay()
 {
 	Super::BeginPlay();
-
-	CreateSkyboxMaterial();
 }
 
 void ASkyBoxActor::SetSkyboxRadius(float InRadius)
@@ -45,29 +50,5 @@ void ASkyBoxActor::ApplySkyboxScale()
 	if (SkyMesh)
 	{
 		SkyMesh->SetRelativeScale3D(FVector(SkyboxRadius / 50.0f));
-	}
-}
-
-void ASkyBoxActor::CreateSkyboxMaterial()
-{
-	// Create black space material for skybox
-	if (SkyMesh)
-	{
-		UMaterialInstanceDynamic* SkyMaterial = UMaterialInstanceDynamic::Create(
-			UMaterial::GetDefaultMaterial(MD_Surface), this);
-
-		if (SkyMaterial)
-		{
-			// Set to pure black
-			SkyMaterial->SetVectorParameterValue(FName("BaseColor"), FLinearColor::Black);
-			SkyMaterial->SetScalarParameterValue(FName("Metallic"), 0.0f);
-			SkyMaterial->SetScalarParameterValue(FName("Roughness"), 1.0f);
-			SkyMaterial->SetScalarParameterValue(FName("Emissive"), 0.0f);
-
-			SkyMesh->SetMaterial(0, SkyMaterial);
-		}
-
-		// Make sure we render from inside the sphere
-		SkyMesh->SetRenderInMainPass(true);
 	}
 }
