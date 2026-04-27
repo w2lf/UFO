@@ -7,9 +7,10 @@
 #include "SkyBoxActor.generated.h"
 
 class UStaticMeshComponent;
+class UMaterial;
 
 /**
- * Skybox actor - a large sphere with black space and stars material
+ * Skybox actor - a large sphere with the M_Stars material applied
  */
 UCLASS()
 class UFO_API ASkyBoxActor : public AActor
@@ -32,6 +33,10 @@ protected:
 	float SkyboxRadius;
 
 private:
+	/** Loaded in the constructor via FObjectFinder, applied in BeginPlay */
+	UPROPERTY()
+	UMaterial* StarMaterial;
+
 	void ApplySkyboxScale();
 	void CreateSkyboxMaterial();
 };

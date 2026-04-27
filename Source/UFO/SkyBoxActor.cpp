@@ -3,12 +3,12 @@
 #include "SkyBoxActor.h"
 #include "Components/StaticMeshComponent.h"
 #include "Materials/Material.h"
-#include "Materials/MaterialInstanceDynamic.h"
 
 ASkyBoxActor::ASkyBoxActor()
 {
 	PrimaryActorTick.bCanEverTick = false;
-	SkyboxRadius = 50000.0f; // Very large sphere
+	SkyboxRadius  = 50000.0f;
+	StarMaterial  = nullptr;
 
 	// Create mesh
 	SkyMesh = CreateDefaultSubobject<UStaticMeshComponent>(TEXT("SkyMesh"));
@@ -21,7 +21,13 @@ ASkyBoxActor::ASkyBoxActor()
 		SkyMesh->SetStaticMesh(SphereMesh.Object);
 	}
 
-	// Set collision
+	// FObjectFinder MUST live in the constructor — cache the result for use in BeginPlay
+	static ConstructorHelpers::FObjectFinder<UMaterial> MaterialFinder(TEXT("/Game/M_Stars"));
+	if (MaterialFinder.Succeeded())
+	{
+		StarMaterial = MaterialFinder.Object;
+	}
+
 	SkyMesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 	SkyMesh->CastShadow = false;
 	ApplySkyboxScale();
@@ -30,7 +36,6 @@ ASkyBoxActor::ASkyBoxActor()
 void ASkyBoxActor::BeginPlay()
 {
 	Super::BeginPlay();
-
 	CreateSkyboxMaterial();
 }
 
@@ -50,16 +55,16 @@ void ASkyBoxActor::ApplySkyboxScale()
 
 void ASkyBoxActor::CreateSkyboxMaterial()
 {
-	if (SkyMesh)
-	{
-		// Load M_Stars material from Content folder
-		static ConstructorHelpers::FObjectFinder<UMaterial> StarMaterial(TEXT("/Game/M_Stars"));
-		if (StarMaterial.Succeeded())
-		{
-			SkyMesh->SetMaterial(0, StarMaterial.Object);
-		}
+	if (!SkyMesh) return;
 
-		// Make sure we render from inside the sphere
-		SkyMesh->SetRenderInMainPass(true);
+	if (StarMaterial)
+	{
+		SkyMesh->SetMaterial(0, StarMaterial);
 	}
+	else
+	{
+		UE_LOG(LogTemp, Warning, TEXT("ASkyBoxActor: M_Stars material not found at /Game/M_Stars — check the asset path."));
+	}
+
+	SkyMesh->SetRenderInMainPass(true);
 }
