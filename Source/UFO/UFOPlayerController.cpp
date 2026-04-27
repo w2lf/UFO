@@ -179,20 +179,20 @@ void AUFOPlayerController::FireLaserAtSelectedNPC()
 	if ((Now - LastFireTime) < FireCooldown) return;
 	LastFireTime = Now;
 
-	// Spawn at the UFO's location, aimed at the target
-	const FVector  SpawnLocation  = UFOPawn->GetActorLocation();
-	const FVector  ToTarget       = (SelectedNPC->GetActorLocation() - SpawnLocation).GetSafeNormal();
-	const FRotator SpawnRotation  = ToTarget.Rotation();
+	// Renamed to avoid C4458: hides APlayerController::SpawnLocation
+	const FVector  LaserSpawnLocation = UFOPawn->GetActorLocation();
+	const FVector  ToTarget           = (SelectedNPC->GetActorLocation() - LaserSpawnLocation).GetSafeNormal();
+	const FRotator LaserSpawnRotation = ToTarget.Rotation();
 
 	FActorSpawnParameters SpawnParams;
-	SpawnParams.Owner   = UFOPawn;
+	SpawnParams.Owner      = UFOPawn;
 	SpawnParams.Instigator = GetPawn();
 	SpawnParams.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
 
 	ALaserProjectile* Laser = GetWorld()->SpawnActor<ALaserProjectile>(
 		ALaserProjectile::StaticClass(),
-		SpawnLocation,
-		SpawnRotation,
+		LaserSpawnLocation,
+		LaserSpawnRotation,
 		SpawnParams);
 
 	if (Laser)
